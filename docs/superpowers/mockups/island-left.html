@@ -1,0 +1,85 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Agent Islands, left placement</title>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+  :root{--bg:#0c0c0e;--line:rgba(255,255,255,.07);--fg:#f2f2f4;--fg2:#b4b4bc;--fg3:#8a8a94;
+    --s1:#ff6b35;--s2:#1e9bff;--s3:#b85cff;--s4:#ff3d8b;--s5:#14c8c0;--ok:#2bd45f;--warn:#ffb800;--deny:#ff4d4d}
+  body{margin:0;background:#15171c;color:#e5e7ec;font-family:"Geist",system-ui,sans-serif;-webkit-font-smoothing:antialiased;padding:24px}
+  h1{font-size:20px;font-weight:600;margin:0 0 4px}
+  p.sub{margin:0 0 20px;color:#b4b8c2;font-size:13px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:18px}
+  .cap{font:500 11px/1 "Geist";letter-spacing:.08em;text-transform:uppercase;color:#c9ccd4;margin:0 0 8px}
+  .desk{position:relative;height:330px;border-radius:6px;overflow:hidden;background:linear-gradient(160deg,#2b3140,#1a1d24)}
+  .titlebar{position:absolute;left:0;right:0;top:0;height:34px;background:#202329;border-bottom:1px solid #2c3038;display:flex;align-items:center;padding:0 10px;gap:8px;font-size:11px;color:#9ba0aa}
+  .titlebar .tab{background:#2c3038;padding:5px 10px;border-radius:4px}
+  .titlebar .ctl{margin-left:auto;letter-spacing:14px}
+  .anchor{position:absolute;left:8px;top:64px;display:flex;align-items:flex-start;gap:8px}
+  .vpill{background:var(--bg);border:1px solid var(--line);border-radius:999px;display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 5px;box-shadow:0 8px 24px rgba(0,0,0,.45)}
+  .box{background:var(--bg);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:14px 16px;width:280px;box-shadow:0 12px 32px rgba(0,0,0,.5)}
+  .label{background:var(--bg);border:1px solid var(--line);border-radius:999px;padding:6px 12px;font-size:12.5px;white-space:nowrap;box-shadow:0 8px 24px rgba(0,0,0,.45)}
+  .row{display:flex;gap:8px;align-items:center}
+  .title{font-size:14px;font-weight:600;letter-spacing:-.01em}
+  .path{font:400 11px/1.4 "Geist Mono",monospace;color:var(--fg3);margin-top:2px}
+  .todo{display:flex;align-items:center;gap:10px;padding:4px 0;font-size:13px}
+  .chk{width:14px;height:14px;border-radius:50%;background:var(--ok);color:var(--bg);font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  .spin{width:10px;height:10px;border:2px solid #34343a;border-top-color:var(--fg);border-radius:50%;animation:sp .8s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .meta{font-size:12px;color:var(--fg2);margin-top:6px}
+  .cmd{display:block;background:#17171a;border:1px solid var(--line);border-radius:4px;padding:8px 10px;margin-top:10px;font:12px "Geist Mono",monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .btns{display:flex;gap:8px;margin-top:12px}
+  .b{flex:1;text-align:center;padding:8px 0;border-radius:4px;font-weight:500;font-size:12.5px}
+  .allow{background:var(--ok);color:#06140d}.deny{background:#1d1d21;color:var(--deny);border:1px solid var(--line)}
+  .selbar{position:relative}.selbar::after{content:"";position:absolute;left:-6px;top:50%;width:2px;height:12px;margin-top:-6px;border-radius:1px;background:var(--fg)}
+  svg{display:block;overflow:visible}
+  .m-bounce{animation:mb .9s ease-in-out infinite;transform-box:fill-box;transform-origin:50% 100%}
+  @keyframes mb{0%,100%{transform:translateY(0) scale(1,1)}40%{transform:translateY(-1.6px) scale(.97,1.03)}80%{transform:translateY(0) scale(1.04,.95)}}
+  .m-pop{animation:mp 1.2s ease-in-out infinite;transform-box:fill-box;transform-origin:50% 50%}@keyframes mp{50%{transform:scale(1.15)}}
+  .dim{opacity:.5}
+</style></head><body>
+<h1>Agent Islands on the left edge</h1>
+<p class="sub">The island sits 8 px from the left edge, below window title bars and tab strips. Blobs stack vertically. Panels and cards open to the right of the pill.</p>
+<div class="grid">
+
+<div><div class="cap">1 &middot; Collapsed: 4 open sessions (2 working, 1 waiting, 1 idle)</div>
+<div class="desk"><div class="titlebar"><span class="tab">payments-api</span><span class="tab">web-dashboard</span><span class="ctl">- o x</span></div>
+  <div class="anchor"><div class="vpill"><b data-b="s1 work"></b><b data-b="s2 work"></b><b data-b="s3 wait"></b><b data-b="s4 idle"></b></div></div>
+</div></div>
+
+<div><div class="cap">2 &middot; Expanded: orange session selected</div>
+<div class="desk"><div class="titlebar"><span class="tab">payments-api</span><span class="ctl">- o x</span></div>
+  <div class="anchor"><div class="vpill"><span class="selbar"><b data-b="s1 work"></b></span><b data-b="s2 work"></b><b data-b="s3 wait"></b><b data-b="s4 idle"></b></div>
+    <div class="box"><div class="title">payments-api</div><div class="path">D:\projects\payments-api</div>
+      <div style="margin-top:10px">
+      <div class="todo"><span class="chk">&#10003;</span><span style="color:var(--fg2)">Read codebase structure</span></div>
+      <div class="todo"><span class="chk">&#10003;</span><span style="color:var(--fg2)">Review existing auth middleware</span></div>
+      <div class="todo"><span class="spin"></span><span style="font-weight:500">Write implementation plan</span></div></div>
+    </div></div>
+</div></div>
+
+<div><div class="cap">3 &middot; Permission request</div>
+<div class="desk"><div class="titlebar"><span class="tab">web-dashboard</span><span class="ctl">- o x</span></div>
+  <div class="anchor"><div class="vpill"><b data-b="s1 work"></b><b data-b="s2 work"></b><span class="selbar"><b data-b="s3 wait"></b></span><b data-b="s4 idle"></b></div>
+    <div class="box" style="margin-top:44px"><div class="title">web-dashboard</div><div class="meta">Wants to run a command</div>
+      <span class="cmd"><span style="color:var(--warn)">Bash</span>&nbsp; npm install zod@3.23.8</span>
+      <div class="btns"><span class="b deny">Deny</span><span class="b allow">Allow</span></div></div></div>
+</div></div>
+
+<div><div class="cap">4 &middot; Finished: label beside its blob</div>
+<div class="desk"><div class="titlebar"><span class="tab">payments-api</span><span class="ctl">- o x</span></div>
+  <div class="anchor"><div class="vpill"><b data-b="s1 done"></b><b data-b="s2 work"></b><b data-b="s3 idle"></b><b data-b="s4 idle"></b></div>
+    <div class="label" style="margin-top:6px"><b style="font-weight:600">payments-api</b> <span style="color:var(--fg2)">finished</span></div></div>
+</div></div>
+
+</div>
+<script>
+const D="#0c0c0e";
+const open=(y,r)=>`<ellipse cx="9.3" cy="${y}" rx="${r}" ry="${r*1.3}" fill="${D}"/><ellipse cx="14.7" cy="${y}" rx="${r}" ry="${r*1.3}" fill="${D}"/>`;
+const happy=`<path d="M8 14.6q1.3-1.8 2.6 0M13.4 14.6q1.3-1.8 2.6 0" stroke="${D}" stroke-width="1.3" fill="none" stroke-linecap="round"/>`;
+function blob(c,s){
+  const face=s==="done"?happy:s==="wait"?open(12.6,1.1)+`<circle cx="12" cy="16.8" r=".8" fill="${D}"/>`:open(14,1.15);
+  const badge=s==="wait"?`<g class="m-pop"><circle cx="20.5" cy="4.5" r="3.4" fill="var(--warn)" stroke="${D}"/><rect x="20" y="2.5" width="1" height="2.6" rx=".5" fill="${D}"/><circle cx="20.5" cy="6.4" r=".6" fill="${D}"/></g>`
+   :s==="done"?`<circle cx="20.5" cy="4.5" r="3.4" fill="var(--ok)" stroke="${D}"/><path d="M18.9 4.6l1.1 1.1 2.1-2.3" stroke="${D}" stroke-width="1.1" fill="none" stroke-linecap="round"/>`:"";
+  return `<svg width="22" height="22" viewBox="0 0 24 24" class="${s==="idle"?"dim":""}"><g class="${s==="work"?"m-bounce":""}"><path d="M3.5 17c0-6.5 3.8-11 8.5-11s8.5 4.5 8.5 11c0 2.4-2.6 3.5-8.5 3.5S3.5 19.4 3.5 17z" fill="var(--${c})"/><ellipse cx="8.4" cy="10.2" rx="2" ry="1.2" fill="#fff" opacity=".35"/>${face}</g>${badge}</svg>`;
+}
+document.querySelectorAll("[data-b]").forEach(e=>{const [c,s]=e.dataset.b.split(" ");e.outerHTML=blob(c,s)});
+</script></body></html>

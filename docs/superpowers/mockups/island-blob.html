@@ -1,0 +1,108 @@
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  .ci{--bg:#0c0c0e;--line:rgba(255,255,255,.07);--fg:#f2f2f4;--fg2:#b4b4bc;--fg3:#8a8a94;
+      --s1:#ff6b35;--s2:#1e9bff;--s3:#b85cff;--ok:#2bd45f;--warn:#ffb800;--deny:#ff4d4d;
+      font-family:"Geist",system-ui,sans-serif;font-feature-settings:"tnum" 1;-webkit-font-smoothing:antialiased}
+  .ci .stage{background:#20232a;border-radius:6px;padding:20px 0 30px;display:flex;flex-direction:column;align-items:center;gap:10px}
+  .ci .cap{font:500 11px/1 "Geist",sans-serif;letter-spacing:.08em;text-transform:uppercase;color:#c9ccd4}
+  .ci .pill{background:var(--bg);border:1px solid var(--line);color:var(--fg);border-radius:999px;display:flex;align-items:center;gap:6px;padding:5px 14px;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+  .ci .box{background:var(--bg);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:16px 18px;width:340px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+  .ci .row{display:flex;gap:10px;align-items:center}
+  .ci .tab{display:flex;flex-direction:column;align-items:center;gap:4px}
+  .ci .tab i{display:block;width:14px;height:2px;border-radius:1px;background:transparent}
+  .ci .tab.on i{background:var(--fg)}
+  .ci .title{font-size:14px;font-weight:600;letter-spacing:-.01em}
+  .ci .path{font:400 11px/1.4 "Geist Mono",monospace;color:var(--fg3);margin-top:2px}
+  .ci .rule{height:1px;background:var(--line);margin:10px 0 8px}
+  .ci .todo{display:flex;align-items:center;gap:10px;padding:5px 0;font-size:13px;line-height:1.3}
+  .ci .chk{width:14px;height:14px;border-radius:50%;background:var(--ok);color:var(--bg);font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none}
+  .ci .spin{width:10px;height:10px;border:2px solid #34343a;border-top-color:var(--fg);border-radius:50%;animation:ci-sp .8s linear infinite;flex:none}
+  @keyframes ci-sp{to{transform:rotate(360deg)}}
+  .ci .doneT{color:var(--fg2)}.ci .cur{font-weight:500}
+  .ci .meta{font-size:12px;color:var(--fg2)}
+  .ci .btns{display:flex;gap:8px;margin-top:14px}
+  .ci .b{flex:1;text-align:center;padding:8px 0;border-radius:4px;font-weight:500;font-size:12.5px}
+  .ci .allow{background:var(--ok);color:#06140d}.ci .deny{background:#1d1d21;color:var(--deny);border:1px solid var(--line)}.ci .go{background:#1d1d21;color:var(--fg);border:1px solid var(--line)}
+  .ci .cmd{display:block;background:#17171a;border:1px solid var(--line);border-radius:4px;padding:8px 10px;margin-top:10px;font:400 12px/1.3 "Geist Mono",monospace;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ci .tool{color:var(--warn)}
+  .ci .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+  .ci svg{overflow:visible;display:block}
+  .m-bounce{animation:mb .9s ease-in-out infinite;transform-box:fill-box;transform-origin:50% 100%}
+  @keyframes mb{0%,100%{transform:translateY(0) scale(1,1)}40%{transform:translateY(-1.6px) scale(.97,1.03)}80%{transform:translateY(0) scale(1.04,.95)}}
+  .m-pop{animation:mp 1.2s ease-in-out infinite;transform-box:fill-box;transform-origin:50% 50%}@keyframes mp{50%{transform:scale(1.15)}}
+</style>
+
+<h2>Island with Blob</h2>
+<p class="subtitle">The collapsed island is now a full pill. The expanded panel and cards keep 8px corners. A small bar under a blob marks the selected session.</p>
+
+<div class="ci">
+<div class="grid" style="margin-top:0">
+  <div class="stage"><div class="cap">1 &middot; One session working</div>
+    <div class="pill"><b data-blob="s1 work 20"></b></div>
+  </div>
+  <div class="stage"><div class="cap">2 &middot; Three working, one needs you</div>
+    <div class="pill"><b data-blob="s1 work 20"></b><b data-blob="s2 work 20"></b><b data-blob="s3 wait 20"></b></div>
+  </div>
+</div>
+
+<div class="stage" style="margin-top:12px"><div class="cap">3 &middot; Expanded, orange session selected</div>
+  <div class="box">
+    <div class="row">
+      <div class="tab on"><b data-blob="s1 work 26"></b><i></i></div>
+      <div class="tab"><b data-blob="s2 work 26"></b><i></i></div>
+      <div class="tab"><b data-blob="s3 wait 26"></b><i></i></div>
+    </div>
+    <div class="rule"></div>
+    <div class="title">payments-api</div>
+    <div class="path">D:\projects\payments-api</div>
+    <div style="margin-top:10px">
+      <div class="todo"><span class="chk">&#10003;</span><span class="doneT">Read codebase structure</span></div>
+      <div class="todo"><span class="chk">&#10003;</span><span class="doneT">Review existing auth middleware</span></div>
+      <div class="todo"><span class="spin"></span><span class="cur">Write implementation plan</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="stage"><div class="cap">4 &middot; Permission request</div>
+    <div class="box" style="width:290px">
+      <div class="row"><b data-blob="s3 wait 20"></b><span class="title">web-dashboard</span></div>
+      <div class="meta" style="margin-top:6px">Wants to run a command</div>
+      <span class="cmd"><span class="tool">Bash</span>&nbsp; npm install zod@3.23.8</span>
+      <div class="btns"><span class="b deny">Deny</span><span class="b allow">Allow</span></div>
+    </div>
+  </div>
+  <div class="stage"><div class="cap">5 &middot; Question or other wait</div>
+    <div class="box" style="width:290px">
+      <div class="row"><b data-blob="s3 wait 20"></b><span class="title">web-dashboard</span></div>
+      <div class="meta" style="margin-top:6px">Has a question for you</div>
+      <div class="btns"><span class="b go">Go to terminal</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="stage"><div class="cap">6 &middot; Session finished</div>
+    <div class="pill" style="gap:8px;padding:5px 16px 5px 10px"><b data-blob="s1 done 20"></b><span style="font-size:13px"><span style="font-weight:600">payments-api</span> <span style="color:var(--fg2)">finished</span></span></div>
+  </div>
+  <div class="stage"><div class="cap">7 &middot; Nothing running</div>
+    <div style="color:#c9ccd4;font-size:12px;padding:10px">No island shown</div>
+  </div>
+</div>
+</div>
+
+<script>
+const D="#0c0c0e";
+const open=(y,r)=>`<ellipse cx="9.3" cy="${y}" rx="${r}" ry="${r*1.3}" fill="${D}"/><ellipse cx="14.7" cy="${y}" rx="${r}" ry="${r*1.3}" fill="${D}"/>`;
+const happy=`<path d="M8 14.6q1.3-1.8 2.6 0M13.4 14.6q1.3-1.8 2.6 0" stroke="${D}" stroke-width="1.3" fill="none" stroke-linecap="round"/>`;
+function blob(c,s,px){
+  const face=s==="done"?happy:s==="wait"?open(12.6,1.1)+`<circle cx="12" cy="16.8" r=".8" fill="${D}"/>`:open(14,1.15);
+  const badge=s==="wait"?`<g class="m-pop"><circle cx="20.5" cy="4.5" r="3.4" fill="var(--warn)" stroke="${D}" stroke-width="1"/><rect x="20" y="2.5" width="1" height="2.6" rx=".5" fill="${D}"/><circle cx="20.5" cy="6.4" r=".6" fill="${D}"/></g>`
+    :s==="done"?`<circle cx="20.5" cy="4.5" r="3.4" fill="var(--ok)" stroke="${D}" stroke-width="1"/><path d="M18.9 4.6l1.1 1.1 2.1-2.3" stroke="${D}" stroke-width="1.1" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`:"";
+  return `<svg width="${px}" height="${px}" viewBox="0 0 24 24"><g class="${s==="work"?"m-bounce":""}">
+    <path d="M3.5 17c0-6.5 3.8-11 8.5-11s8.5 4.5 8.5 11c0 2.4-2.6 3.5-8.5 3.5S3.5 19.4 3.5 17z" fill="var(--${c})"/>
+    <ellipse cx="8.4" cy="10.2" rx="2" ry="1.2" fill="#fff" opacity=".35"/>${face}</g>${badge}</svg>`;
+}
+document.querySelectorAll("[data-blob]").forEach(e=>{const [c,s,px]=e.dataset.blob.split(" ");e.outerHTML=blob(c,s,+px)});
+</script>
