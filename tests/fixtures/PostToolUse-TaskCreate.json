@@ -1,0 +1,25 @@
+{
+  "session_id": "2035275b-3b95-434c-af6f-b77c73649800",
+  "transcript_path": "C:\\Users\\USER\\.claude\\projects\\PROJ\\SESSION.jsonl",
+  "cwd": "D:\\projects\\agent-islands\\spike\\sandbox",
+  "prompt_id": "ca6fb686-f53d-4b77-875e-e8a42155a355",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "TaskCreate",
+  "tool_input": {
+    "subject": "Task A",
+    "description": "Task A"
+  },
+  "tool_response": {
+    "task": {
+      "id": "1",
+      "subject": "Task A",
+      "description": "Task A"
+    }
+  },
+  "tool_use_id": "toolu_012c7hhHYqYHH4JgQFP5kAjd",
+  "duration_ms": 886
+}

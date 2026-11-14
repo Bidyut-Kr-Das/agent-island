@@ -1,0 +1,30 @@
+{
+  "session_id": "02f0fc66-e7c4-498f-8b25-b29dfac9bd38",
+  "transcript_path": "C:\\Users\\USER\\.claude\\projects\\PROJ\\SESSION.jsonl",
+  "cwd": "D:\\projects\\agent-islands\\spike\\sandbox",
+  "prompt_id": "6fdba006-b132-4353-bd5a-728b9c119626",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "mkdir spike_probe_dir",
+    "description": "Create directory spike_probe_dir"
+  },
+  "permission_suggestions": [
+    {
+      "type": "addDirectories",
+      "directories": [
+        "D:\\projects\\agent-islands\\spike\\sandbox"
+      ],
+      "destination": "session"
+    },
+    {
+      "type": "setMode",
+      "mode": "acceptEdits",
+      "destination": "session"
+    }
+  ]
+}

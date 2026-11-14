@@ -1,0 +1,10 @@
+{
+  "session_id": "2035275b-3b95-434c-af6f-b77c73649800",
+  "transcript_path": "C:\\Users\\USER\\.claude\\projects\\PROJ\\SESSION.jsonl",
+  "cwd": "D:\\projects\\agent-islands\\spike\\sandbox",
+  "prompt_id": "ca6fb686-f53d-4b77-875e-e8a42155a355",
+  "hook_event_name": "TaskCreated",
+  "task_id": "1",
+  "task_subject": "Task A",
+  "task_description": "Task A"
+}

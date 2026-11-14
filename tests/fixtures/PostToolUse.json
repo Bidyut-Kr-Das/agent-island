@@ -1,0 +1,25 @@
+{
+  "session_id": "2035275b-3b95-434c-af6f-b77c73649800",
+  "transcript_path": "C:\\Users\\USER\\.claude\\projects\\PROJ\\SESSION.jsonl",
+  "cwd": "D:\\projects\\agent-islands\\spike\\sandbox",
+  "prompt_id": "ca6fb686-f53d-4b77-875e-e8a42155a355",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "echo hi",
+    "description": "Print hi"
+  },
+  "tool_response": {
+    "stdout": "hi",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false
+  },
+  "tool_use_id": "toolu_01GLGdwMuLFcPzF7SjRYZGRg",
+  "duration_ms": 1175
+}

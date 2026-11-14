@@ -1,0 +1,69 @@
+{
+  "session_id": "63f71cdd-6959-4d0d-ac83-f44c8270f171",
+  "transcript_path": "C:\\Users\\USER\\.claude\\projects\\PROJ\\SESSION.jsonl",
+  "cwd": "D:\\projects\\agent-islands\\spike\\sandbox",
+  "prompt_id": "782f5385-e038-40fd-b197-3c238bceb858",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "tool_name": "TodoWrite",
+  "tool_input": {
+    "todos": [
+      {
+        "content": "A",
+        "status": "in_progress",
+        "activeForm": "Doing A"
+      },
+      {
+        "content": "B",
+        "status": "pending",
+        "activeForm": "Doing B"
+      },
+      {
+        "content": "C",
+        "status": "pending",
+        "activeForm": "Doing C"
+      }
+    ]
+  },
+  "tool_response": {
+    "oldTodos": [
+      {
+        "content": "A",
+        "status": "pending",
+        "activeForm": "Doing A"
+      },
+      {
+        "content": "B",
+        "status": "pending",
+        "activeForm": "Doing B"
+      },
+      {
+        "content": "C",
+        "status": "pending",
+        "activeForm": "Doing C"
+      }
+    ],
+    "newTodos": [
+      {
+        "content": "A",
+        "status": "in_progress",
+        "activeForm": "Doing A"
+      },
+      {
+        "content": "B",
+        "status": "pending",
+        "activeForm": "Doing B"
+      },
+      {
+        "content": "C",
+        "status": "pending",
+        "activeForm": "Doing C"
+      }
+    ]
+  },
+  "tool_use_id": "toolu_01NarshesZUrT7NWc8CqRMNA",
+  "duration_ms": 1
+}
