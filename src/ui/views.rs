@@ -1,4 +1,5 @@
 use super::Core;
+use crate::settings::Side;
 use crate::state::{Finish, Permission, Session, Todo, TodoStatus, WaitKind};
 use std::collections::VecDeque;
 use std::hash::Hash;
@@ -23,6 +24,22 @@ const CARD_W: f32 = 280.0;
 pub const WIN_W: f32 = 400.0;
 pub const WIN_H: f32 = 520.0;
 
+/// Left x of the pill inside the window.
+pub fn pill_x(side: Side) -> f32 {
+    match side {
+        Side::Left => MARGIN,
+        Side::Right => WIN_W - MARGIN - PILL_W,
+    }
+}
+
+/// Left x of a box `w` wide beside the pill, 8 px away, on the side away from the screen edge.
+pub fn beside(pill: Rect, w: f32, side: Side) -> f32 {
+    match side {
+        Side::Left => pill.right() + 8.0,
+        Side::Right => pill.left() - 8.0 - w,
+    }
+}
+
 /// Outer pill height for `n` blobs (island-left.html .vpill: 1 px border, 10 px padding, 24 px blobs, 6 px gap).
 pub fn pill_height(n: usize) -> f32 {
     if n == 0 { 0.0 } else { 2.0 + 2.0 * PAD_Y + n as f32 * BLOB + (n - 1) as f32 * GAP }
@@ -35,9 +52,9 @@ pub fn hit(p: Pos2, r: Rect) -> bool {
     p.distance(Pos2::new(r.center().x, y)) <= rad
 }
 
-pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, t: f64) -> egui::Response {
+pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, t: f64) -> egui::Response {
     let h = ui.ctx().animate_value_with_time(Id::unique("pill_h"), pill_height(core.state.sessions.len()), 0.25);
-    let r = Rect::from_min_size(pos2(MARGIN, MARGIN), vec2(PILL_W, h));
+    let r = Rect::from_min_size(pos2(pill_x(side), MARGIN), vec2(PILL_W, h));
     let resp = ui.allocate_rect(r, Sense::click());
     if r.height() < 1.0 {
         return resp;
@@ -52,8 +69,9 @@ pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, t: f64) -> e
         let color = SESSION[s.color % SESSION.len()];
         paint_blob(&clip, pos2(r.center().x, bottom), BLOB, color, BlobState::of(s.status, s.finished), t);
         if selected == Some(s.id.as_str()) {
-            // island-left.html .selbar: 2 x 12 px, 6 px left of the blob box, vertically centered on it.
-            let bar = Rect::from_min_size(pos2(r.center().x - BLOB / 2.0 - 6.0, bottom - BLOB / 2.0 - 6.0), vec2(2.0, 12.0));
+            // island-left.html .selbar: 2 x 12 px, 6 px outside the blob box (mirrored on the right), vertically centered on it.
+            let bx = if side == Side::Left { r.center().x - BLOB / 2.0 - 6.0 } else { r.center().x + BLOB / 2.0 + 4.0 };
+            let bar = Rect::from_min_size(pos2(bx, bottom - BLOB / 2.0 - 6.0), vec2(2.0, 12.0));
             p.rect_filled(bar, 1.0, FG);
         }
     }
@@ -63,7 +81,7 @@ pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, t: f64) -> e
 /// The expanded panel for the selected session, right of `pill`. Closes (sets `selected` to None) when that
 /// session is gone. Returns the panel's current on-screen rect (`Rect::NOTHING` when fully closed) and
 /// whether "Go to terminal" was clicked.
-pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill: Rect, t: f64) -> (Rect, bool) {
+pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill: Rect, side: Side, t: f64) -> (Rect, bool) {
     let find = |id: &str| core.state.sessions.iter().find(|s| s.id == id);
     if selected.as_deref().is_some_and(|id| find(id).is_none()) {
         *selected = None;
@@ -97,7 +115,7 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
     let heights: Vec<f32> = rows.iter().map(|(_, g)| g.size().y.max(14.0) + 8.0).collect();
     let head = 2.0 + 28.0 + title.size().y + if rows.is_empty() { 0.0 } else { 10.0 };
     let first = first_row(&heights, WIN_H - MARGIN - pill.top() - head);
-    let full = panel_rect(pill, head + heights[first..].iter().sum::<f32>());
+    let full = panel_rect(pill, head + heights[first..].iter().sum::<f32>(), side);
 
     let r = Rect::from_min_size(full.min, full.size() * (0.6 + 0.4 * k));
     let mut p = ui.painter().clone();
@@ -256,8 +274,8 @@ pub fn blob_at(p: Pos2, pill: Rect, n: usize) -> Option<usize> {
 }
 
 /// Panel at full size: 8 px right of the pill, top-aligned, no taller than the window allows.
-pub fn panel_rect(pill: Rect, h: f32) -> Rect {
-    Rect::from_min_size(pos2(pill.right() + 8.0, pill.top()), vec2(PANEL_W, h.min(WIN_H - MARGIN - pill.top())))
+pub fn panel_rect(pill: Rect, h: f32, side: Side) -> Rect {
+    Rect::from_min_size(pos2(beside(pill, PANEL_W, side), pill.top()), vec2(PANEL_W, h.min(WIN_H - MARGIN - pill.top())))
 }
 
 /// Index of the first row to draw so the last rows fit into `avail`.
@@ -289,7 +307,7 @@ type Btn<'a> = (&'a str, Color32, Color32, bool);
 /// Card beside session `s`'s blob (island-blob.html states 4 and 5, island-left.html state 3 placement):
 /// waiting blob and project, `meta`, optional command box, buttons. Returns its rect and the clicked button.
 #[allow(clippy::too_many_arguments)]
-fn card(ui: &mut egui::Ui, core: &Core, s: &Session, key: impl Hash + std::fmt::Debug + Copy, meta: &str, corner: Option<String>, cmd: Option<&Permission>, btns: &[Btn], armed: bool, pill: Rect, t: f64) -> (Rect, Option<usize>) {
+fn card(ui: &mut egui::Ui, core: &Core, s: &Session, key: impl Hash + std::fmt::Debug + Copy, meta: &str, corner: Option<String>, cmd: Option<&Permission>, btns: &[Btn], armed: bool, pill: Rect, side: Side, t: f64) -> (Rect, Option<usize>) {
     let p = ui.painter().clone();
     let inner = CARD_W - 2.0 - 32.0;
     let corner = corner.map(|c| layout(&p, &[(&c, fmt(11.0, "geist", FG3))], inner, 1));
@@ -306,7 +324,7 @@ fn card(ui: &mut egui::Ui, core: &Core, s: &Session, key: impl Hash + std::fmt::
     let btn_h = 31.0;
     let h = 15.0 + 20.0 + 6.0 + meta.size().y + cmd_h + 12.0 + btn_h + 15.0;
     let i = core.state.sessions.iter().position(|x| x.id == s.id).unwrap_or(0);
-    let r = card_rect(pill, i, h);
+    let r = card_rect(pill, i, h, side);
 
     p.add(Shadow { offset: [0, 12], blur: 32, spread: 0, color: Color32::from_black_alpha(128) }.as_shape(r, 8.0));
     p.rect(r, 8.0, BG, Stroke::new(1.0, LINE), StrokeKind::Inside);
@@ -403,30 +421,30 @@ pub fn press_time(prev: f64, pressed_now: bool, start: Option<f64>, now: f64) ->
 
 /// Permission card for `req_id` (spec 7.4). Returns its rect and the user's answer, if clicked this frame.
 /// `armed` only dims the buttons; the caller decides whether a click counts.
-pub fn permission_card(ui: &mut egui::Ui, core: &Core, req_id: u64, armed: bool, pill: Rect, t: f64) -> (Rect, Option<Reply>) {
+pub fn permission_card(ui: &mut egui::Ui, core: &Core, req_id: u64, armed: bool, pill: Rect, side: Side, t: f64) -> (Rect, Option<Reply>) {
     let st = &core.state;
     let Some(perm) = st.permissions.iter().find(|p| p.req_id == req_id) else { return (Rect::NOTHING, None) };
     let Some(s) = st.sessions.iter().find(|s| s.id == perm.session_id) else { return (Rect::NOTHING, None) };
     let btns = [("Deny", BTN_BG, DENY, true), ("Allow", OK, ALLOW_FG, false)];
-    let (r, k) = card(ui, core, s, req_id, &perm.verb, of_n(&st.permissions), Some(perm), &btns, armed, pill, t);
+    let (r, k) = card(ui, core, s, req_id, &perm.verb, of_n(&st.permissions), Some(perm), &btns, armed, pill, side, t);
     (r, k.map(|k| if k == 0 { Reply::Deny } else { Reply::Allow }))
 }
 
 /// Waiting card for session `id` (spec 7.5). Returns its rect and whether "Go to terminal" was clicked.
-pub fn waiting_card(ui: &mut egui::Ui, core: &Core, id: &str, pill: Rect, t: f64) -> (Rect, bool) {
+pub fn waiting_card(ui: &mut egui::Ui, core: &Core, id: &str, pill: Rect, side: Side, t: f64) -> (Rect, bool) {
     let Some(s) = core.state.sessions.iter().find(|s| s.id == id) else { return (Rect::NOTHING, false) };
-    let (r, k) = card(ui, core, s, id, waiting_text(s.status), None, None, &[("Go to terminal", BTN_BG, FG, true)], true, pill, t);
+    let (r, k) = card(ui, core, s, id, waiting_text(s.status), None, None, &[("Go to terminal", BTN_BG, FG, true)], true, pill, side, t);
     (r, k.is_some())
 }
 
 /// Finished label beside the topmost finished blob (spec 7.6, island-left.html state 4).
 /// Returns its rect and the session to open when clicked.
-pub fn finished_pill(ui: &mut egui::Ui, core: &Core, pill: Rect) -> (Rect, Option<String>) {
+pub fn finished_pill(ui: &mut egui::Ui, core: &Core, pill: Rect, side: Side) -> (Rect, Option<String>) {
     let sessions = &core.state.sessions;
     let Some((i, bold, muted)) = finished_label(sessions) else { return (Rect::NOTHING, None) };
     let p = ui.painter().clone();
     let g = layout(&p, &[(&bold, fmt(12.5, "geist", SESSION[sessions[i].color % SESSION.len()])), (" ", fmt(12.5, "geist", FG2)), (muted, fmt(12.5, "geist", FG2))], f32::INFINITY, 1);
-    let r = label_rect(pill, i, g.size() + vec2(26.0, 14.0));
+    let r = label_rect(pill, i, g.size() + vec2(26.0, 14.0), side);
     p.add(Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(115) }.as_shape(r, r.height() / 2.0));
     p.rect(r, r.height() / 2.0, BG, Stroke::new(1.0, LINE), StrokeKind::Inside);
     p.galley(r.center() - g.size() / 2.0, g, FG);
@@ -482,14 +500,42 @@ fn blob_top(pill: Rect, i: usize) -> f32 {
 }
 
 /// Card 8 px right of the pill, top-aligned with blob `i`, moved up if needed to fit the window.
-pub fn card_rect(pill: Rect, i: usize, h: f32) -> Rect {
+pub fn card_rect(pill: Rect, i: usize, h: f32, side: Side) -> Rect {
     let top = blob_top(pill, i).min(WIN_H - MARGIN - h).max(MARGIN);
-    Rect::from_min_size(pos2(pill.right() + 8.0, top), vec2(CARD_W, h))
+    Rect::from_min_size(pos2(beside(pill, CARD_W, side), top), vec2(CARD_W, h))
 }
 
 /// Label 8 px right of the pill, vertically centered on blob `i`.
-pub fn label_rect(pill: Rect, i: usize, size: Vec2) -> Rect {
-    Rect::from_min_size(pos2(pill.right() + 8.0, blob_top(pill, i) + BLOB / 2.0 - size.y / 2.0), size)
+pub fn label_rect(pill: Rect, i: usize, size: Vec2, side: Side) -> Rect {
+    Rect::from_min_size(pos2(beside(pill, size.x, side), blob_top(pill, i) + BLOB / 2.0 - size.y / 2.0), size)
+}
+
+/// Settings card beside the pill, top-aligned with it: the title and a "Side" row of Left / Right buttons.
+/// Returns its rect and the side clicked this frame.
+pub fn settings_card(ui: &mut egui::Ui, pill: Rect, side: Side) -> (Rect, Option<Side>) {
+    let p = ui.painter().clone();
+    let h = 15.0 + 20.0 + 12.0 + 28.0 + 15.0;
+    let r = Rect::from_min_size(pos2(beside(pill, CARD_W, side), pill.top().min(WIN_H - MARGIN - h).max(MARGIN)), vec2(CARD_W, h));
+    p.add(Shadow { offset: [0, 12], blur: 32, spread: 0, color: Color32::from_black_alpha(128) }.as_shape(r, 8.0));
+    p.rect(r, 8.0, BG, Stroke::new(1.0, LINE), StrokeKind::Inside);
+    let (x, mut y) = (r.left() + 17.0, r.top() + 15.0);
+    let title = layout(&p, &[("Settings", fmt(14.0, "geist", FG))], f32::INFINITY, 1);
+    p.galley(pos2(x, y + 10.0 - title.size().y / 2.0), title, FG);
+    y += 20.0 + 12.0;
+    let label = layout(&p, &[("Side", fmt(12.5, "geist", FG2))], f32::INFINITY, 1);
+    p.galley(pos2(x, y + 14.0 - label.size().y / 2.0), label, FG2);
+    let mut clicked = None;
+    for (k, (name, s)) in [("Left", Side::Left), ("Right", Side::Right)].into_iter().enumerate() {
+        let b = Rect::from_min_size(pos2(r.right() - 17.0 - 136.0 + k as f32 * 72.0, y), vec2(64.0, 28.0));
+        let fill = if s == side { Color32::from_white_alpha(26) } else { BTN_BG };
+        p.rect(b, 4.0, fill, Stroke::new(1.0, LINE), StrokeKind::Inside);
+        let g = layout(&p, &[(name, fmt(12.5, "geist", FG))], 64.0, 1);
+        p.galley(b.center() - g.size() / 2.0, g, FG);
+        if ui.interact(b, Id::unique(("side", name)), Sense::click()).clicked() {
+            clicked = Some(s);
+        }
+    }
+    (r, clicked)
 }
 
 #[cfg(test)]
@@ -544,7 +590,7 @@ mod tests {
     #[test]
     fn terminal_button_inside_panel_hit_region_top_right() {
         let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 100.0));
-        let panel = panel_rect(pill, 120.0);
+        let panel = panel_rect(pill, 120.0, Side::Left);
         let b = terminal_button_rect(panel);
         assert!(panel.contains_rect(b));
         assert!(b.center().x > panel.center().x && b.center().y < panel.center().y, "top-right");
@@ -579,9 +625,9 @@ mod tests {
     #[test]
     fn panel_sits_8px_right_of_pill_top_aligned_and_capped() {
         let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 100.0));
-        let r = panel_rect(pill, 200.0);
+        let r = panel_rect(pill, 200.0, Side::Left);
         assert_eq!(r, Rect::from_min_size(pos2(50.0, 8.0), vec2(300.0, 200.0)));
-        assert_eq!(panel_rect(pill, 900.0).bottom(), 520.0 - MARGIN, "fits the window");
+        assert_eq!(panel_rect(pill, 900.0, Side::Left).bottom(), 520.0 - MARGIN, "fits the window");
     }
 
     #[test]
@@ -594,15 +640,15 @@ mod tests {
     #[test]
     fn region_pill_and_panel() {
         let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 100.0));
-        let panel = panel_rect(pill, 200.0);
+        let panel = panel_rect(pill, 200.0, Side::Left);
         assert_eq!(region(pill, &[(panel, 8.0)], 1.0), vec![[8, 8, 42, 108, 34], [50, 8, 350, 208, 16]]);
     }
 
     #[test]
     fn region_pill_card_and_label() {
         let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 100.0));
-        let card = card_rect(pill, 0, 150.0);
-        let label = label_rect(pill, 1, vec2(120.0, 30.0));
+        let card = card_rect(pill, 0, 150.0, Side::Left);
+        let label = label_rect(pill, 1, vec2(120.0, 30.0), Side::Left);
         let r = region(pill, &[(card, 8.0), (label, 15.0)], 2.0);
         assert_eq!(r.len(), 3);
         assert_eq!(r[1], [100, 38, 660, 338, 32]);
@@ -612,7 +658,7 @@ mod tests {
     #[test]
     fn inside_covers_pill_and_panel_only() {
         let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 100.0));
-        let panel = panel_rect(pill, 200.0);
+        let panel = panel_rect(pill, 200.0, Side::Left);
         assert!(inside(pos2(25.0, 50.0), pill, panel));
         assert!(inside(pos2(200.0, 150.0), pill, panel));
         assert!(!inside(pos2(46.0, 50.0), pill, panel), "the gap between");
@@ -648,6 +694,25 @@ mod tests {
         let v: Vec<f32> = (0..=10).map(|i| spring(i as f32 / 10.0)).collect();
         assert!(v.windows(2).all(|w| w[1] >= w[0]), "no overshoot: {v:?}");
         assert!(v[5] > 0.8, "critically damped, mostly there by half time: {}", v[5]);
+    }
+
+    #[test]
+    fn beside_left_and_right() {
+        let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 100.0));
+        assert_eq!(beside(pill, 300.0, Side::Left), 50.0);
+        assert_eq!(beside(pill, 300.0, Side::Right) + 300.0, 0.0);
+    }
+
+    #[test]
+    fn pill_x_right_hugs_window_edge() {
+        assert_eq!(pill_x(Side::Left), MARGIN);
+        assert_eq!(pill_x(Side::Right) + PILL_W + MARGIN, WIN_W);
+    }
+
+    #[test]
+    fn panel_rect_right_side_left_of_pill() {
+        let pill = Rect::from_min_size(pos2(358.0, 8.0), vec2(34.0, 100.0));
+        assert_eq!(panel_rect(pill, 100.0, Side::Right).right(), pill.left() - 8.0);
     }
 
     #[test]
@@ -722,15 +787,15 @@ mod tests {
     fn card_sits_8px_right_top_aligned_with_blob_and_fits() {
         let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, pill_height(4)));
         // Blob 2 top: 8 + 1 + 10 + 2 * 30.
-        assert_eq!(card_rect(pill, 2, 150.0), Rect::from_min_size(pos2(50.0, 79.0), vec2(280.0, 150.0)));
-        assert_eq!(card_rect(pill, 2, 480.0).bottom(), 520.0 - MARGIN, "pushed up to fit the window");
+        assert_eq!(card_rect(pill, 2, 150.0, Side::Left), Rect::from_min_size(pos2(50.0, 79.0), vec2(280.0, 150.0)));
+        assert_eq!(card_rect(pill, 2, 480.0, Side::Left).bottom(), 520.0 - MARGIN, "pushed up to fit the window");
     }
 
     #[test]
     fn label_centered_on_blob_8px_right() {
         let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, pill_height(2)));
         // Blob 1 center: 8 + 1 + 10 + 30 + 12 = 61.
-        assert_eq!(label_rect(pill, 1, vec2(120.0, 28.0)), Rect::from_min_size(pos2(50.0, 47.0), vec2(120.0, 28.0)));
+        assert_eq!(label_rect(pill, 1, vec2(120.0, 28.0), Side::Left), Rect::from_min_size(pos2(50.0, 47.0), vec2(120.0, 28.0)));
     }
 
     #[test]

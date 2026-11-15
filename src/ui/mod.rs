@@ -6,6 +6,7 @@ use blob::BlobState;
 use views::View;
 
 use crate::server::Msg;
+use crate::settings::{self, Side};
 use crate::{event, hook::Reply, procs, state::State};
 use eframe::egui::{self, Pos2, ViewportBuilder, ViewportCommand};
 use std::collections::HashMap;
@@ -112,7 +113,8 @@ pub fn run() {
             let hwnd = HWND(h.hwnd.get() as *mut _);
             win::sync_style(hwnd);
             win::no_frame(hwnd);
-            win::place(hwnd);
+            let side = settings::path().map(|p| settings::load_from(&p)).unwrap_or_default();
+            win::place(hwnd, side);
             theme::setup_fonts(&cc.egui_ctx);
             let _ = CTX.set(cc.egui_ctx.clone());
             // Test hook, debug builds only: AGENT_ISLANDS_OPEN=<session id> opens the panel on that session once it exists.
@@ -121,7 +123,7 @@ pub fn run() {
             #[cfg(not(debug_assertions))]
             let open_req = None;
             let app = App {
-                core: Core::new(), rx, hwnd, region: Vec::new(), trimmed: false, selected: None, open_req, was_down: false, arming: None, press_at: f64::NEG_INFINITY,
+                core: Core::new(), rx, hwnd, region: Vec::new(), trimmed: false, selected: None, open_req, was_down: false, side, settings_open: false, arming: None, press_at: f64::NEG_INFINITY,
                 // Test hook, debug builds only: AGENT_ISLANDS_CLICK=allow|deny answers the first permission card 1 s after it shows.
                 #[cfg(debug_assertions)]
                 auto_click: parse_click(std::env::var("AGENT_ISLANDS_CLICK").ok().as_deref()),
@@ -149,6 +151,8 @@ struct App {
     selected: Option<String>,
     open_req: Option<String>,
     was_down: bool,
+    side: Side,
+    settings_open: bool,
     /// Pointer history for the permission card on screen.
     arming: Option<views::Arming>,
     /// When the latest mouse press started (egui time).
@@ -197,7 +201,10 @@ impl eframe::App for App {
             View::Waiting(id) => Some(id.clone()),
             _ => self.selected.clone(),
         };
-        let pill = views::pill(ui, &self.core, marked.as_deref(), t);
+        let pill = views::pill(ui, &self.core, marked.as_deref(), self.side, t);
+        if pill.secondary_clicked() {
+            self.settings_open = !self.settings_open;
+        }
         if pill.clicked() {
             let sessions = &self.core.state.sessions;
             let clicked = pill.interact_pointer_pos().and_then(|p| views::blob_at(p, pill.rect, sessions.len())).map(|i| &sessions[i]);
@@ -215,7 +222,7 @@ impl eframe::App for App {
         let (panel, radius) = match view {
             View::Permission(id) => {
                 let shown = self.arming.filter(|a| a.req == id).is_some_and(|a| views::armed(a.appeared, t, a.entered));
-                let (rect, mut reply) = views::permission_card(ui, &self.core, id, shown, r, t);
+                let (rect, mut reply) = views::permission_card(ui, &self.core, id, shown, r, self.side, t);
                 let over = cursor.is_some_and(|p| rect.contains(p));
                 let a = self.arming.get_or_insert(views::Arming::new(id, t, over, cursor));
                 if a.req != id {
@@ -237,22 +244,33 @@ impl eframe::App for App {
                 (rect, 8.0)
             }
             View::Waiting(id) => {
-                let (rect, go) = views::waiting_card(ui, &self.core, &id, r, t);
+                let (rect, go) = views::waiting_card(ui, &self.core, &id, r, self.side, t);
                 let s = self.core.state.sessions.iter().find(|s| s.id == id);
                 if go && let Some(s) = s {
                     go_to_terminal(s);
                 }
                 (rect, 8.0)
             }
+            View::Panel | View::Pill if self.settings_open => {
+                let (rect, clicked) = views::settings_card(ui, r, self.side);
+                if let Some(side) = clicked {
+                    if let Some(p) = settings::path() {
+                        let _ = settings::save_to(&p, side);
+                    }
+                    self.side = side;
+                    win::place(self.hwnd, side);
+                }
+                (rect, 8.0)
+            }
             View::Panel | View::Pill => {
-                let (panel, go) = views::panel(ui, &self.core, &mut self.selected, r, t);
+                let (panel, go) = views::panel(ui, &self.core, &mut self.selected, r, self.side, t);
                 if go && let Some(s) = self.selected.as_deref().and_then(|id| self.core.state.sessions.iter().find(|s| s.id == id)) {
                     go_to_terminal(s);
                 }
                 if panel.is_positive() {
                     (panel, 8.0)
                 } else {
-                    let (rect, open) = views::finished_pill(ui, &self.core, r);
+                    let (rect, open) = views::finished_pill(ui, &self.core, r, self.side);
                     if let Some(id) = open {
                         self.open_finished(id);
                     }
@@ -275,8 +293,9 @@ impl eframe::App for App {
         win::sync_style(self.hwnd);
         let over = cursor.is_some_and(|p| views::inside(p, r, panel));
         let down = win::left_down();
-        if self.selected.is_some() && views::outside_click(self.was_down, down, over) {
+        if (self.selected.is_some() || self.settings_open) && views::outside_click(self.was_down, down, over) {
             self.selected = None;
+            self.settings_open = false;
         }
         self.was_down = down;
         let moving = panel.is_positive() || self.core.state.sessions.iter().any(|s| matches!(s.status, crate::state::Status::Working | crate::state::Status::Waiting(_)));
@@ -287,7 +306,7 @@ impl eframe::App for App {
 }
 
 mod win {
-    use super::{Pos2, views::MARGIN};
+    use super::{Pos2, Side, views::{MARGIN, WIN_W}};
     use windows::Win32::Foundation::{HWND, POINT, RECT};
     use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
     use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
@@ -303,15 +322,19 @@ mod win {
         }
     }
 
-    /// Top-left of the pill at (8, 96) logical px inside the primary monitor's work area.
-    pub fn place(hwnd: HWND) {
+    /// Window position so the pill sits 8 logical px from the work area's `side` edge, 96 px down.
+    pub fn place(hwnd: HWND, side: Side) {
         let mut work = RECT::default();
         let (mut dpi, mut dpi_y) = (96u32, 96u32);
         unsafe {
             let _ = SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut work as *mut RECT as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
             let _ = GetDpiForMonitor(MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY), MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y);
-            let s = dpi as f32 / 96.0;
-            let (x, y) = (work.left + ((8.0 - MARGIN) * s).round() as i32, work.top + ((96.0 - MARGIN) * s).round() as i32);
+            let k = dpi as f32 / 96.0;
+            let x = match side {
+                Side::Left => work.left as f32 + (8.0 - MARGIN) * k,
+                Side::Right => work.right as f32 - 8.0 * k - (WIN_W - MARGIN) * k,
+            };
+            let (x, y) = (x.round() as i32, work.top + ((96.0 - MARGIN) * k).round() as i32);
             let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }

@@ -7,6 +7,7 @@ mod hook;
 mod pipe;
 mod server;
 mod procs;
+mod settings;
 mod state;
 mod ui;
 
