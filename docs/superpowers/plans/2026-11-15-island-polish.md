@@ -274,6 +274,49 @@ The bug: idle panels keep the last todos (Task 12). When the session starts its 
 - [ ] **Step 5: Run `cargo test` and confirm all pass.**
 - [ ] **Step 6: Commit.** `feat: rebuild session todos from transcript on first sight`
 
+### Task 6b: Title polish (user feedback)
+
+The user rejected the title as rendered (`bots > os-bots-worker` in the session's purple). They want a real icon, not a `>` character; capitalized names; proper alignment; and a professional color, not the random session color.
+
+**Files:**
+- Modify: `src/state.rs`
+  - `display_name` becomes `pub fn display_parts(cwd: &str) -> (String, String)`, returning (parent, name) of the folder chosen as before (repo root or cwd).
+  - `Session` gains `pub parent: String`.
+  - `project` holds the name only.
+- Modify: `src/ui/views.rs`. Change the panel title row, the card titles and the finished label.
+
+**Interfaces:**
+- Produces:
+  - `pub fn pretty(folder: &str) -> String` in `state.rs`: split on `-`, `_`, `.` and spaces, drop empty parts, uppercase the first char of each word (rest unchanged), join with one space. Both `parent` and `project` store the pretty form.
+  - `fn chevron(p: &Painter, center: Pos2, size: f32, color: Color32)` in `views.rs`: a right-pointing chevron drawn with two 1.5 px line segments (no text glyph).
+
+**Rendering:**
+- Panel header row:
+  - `parent` in `FG3`, Geist 12.
+  - Then an 8 px gap, the chevron (8 px tall, `FG3`), and another 8 px gap.
+  - Then `project` in `FG`, Geist 14.
+  - All three are vertically centered on one row.
+  - When `parent` is empty, show only `project`.
+  - If the row is too wide, `parent` is dropped first.
+- Permission and waiting card titles show `project` in `FG`.
+- The finished label shows `project` in `FG` plus the muted part as now.
+- No session color on any text. The session color stays on blobs only.
+
+- [ ] **Step 1: Write the failing tests.**
+  - `pretty_title_cases_words`:
+    - `pretty("os-bots-worker") == "Os Bots Worker"`
+    - `pretty("openscholar_bots.v2") == "Openscholar Bots V2"`
+    - `pretty("bots") == "Bots"`
+    - `pretty("") == ""`
+    - `pretty("API") == "API"`
+  - `display_parts_*`: re-point the Task 2 tests. For example, `<tmp>/ws/repo/.git` with cwd `<tmp>/ws/repo/app` gives `("Ws", "Repo")`; `r"D:\"` gives `("", "D:")`.
+  - `name_follows_cwd` checks both `parent` and `project`.
+  - A views test asserts the title row's chevron sits between the parent and name galleys horizontally. Factor the layout math into a pure function if needed.
+- [ ] **Step 2: Run the tests and confirm they fail.**
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run `cargo test` and confirm all pass.**
+- [ ] **Step 5: Commit.** `fix: title with icon, capitalized names, neutral colors`
+
 ### Task 7: Release
 
 **Files:**

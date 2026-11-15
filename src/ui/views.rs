@@ -100,7 +100,10 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
     // island-left.html .box: 1 px border, 14 / 16 px padding; todo rows 4 px padding, 14 px icon, 10 px gap.
     let inner = PANEL_W - 2.0 - 32.0;
     let text = |s: &str, size: f32, family: &str, color: Color32, width: f32| layout(ui.painter(), &[(s, fmt(size, family, color))], width, 2);
-    let title = text(&s.project, 14.0, "geist", SESSION[s.color % SESSION.len()], inner - 30.0);
+    let name = text(&s.project, 14.0, "geist", FG, inner - 30.0);
+    let parent = text(&s.parent, 12.0, "geist", FG3, f32::INFINITY);
+    let row = title_row(if s.parent.is_empty() { 0.0 } else { parent.size().x }, name.size().x, inner);
+    let title_h = name.size().y;
     let rows: Vec<_> = panel_rows(s)
         .into_iter()
         .map(|(icon, label)| {
@@ -113,7 +116,7 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
         })
         .collect();
     let heights: Vec<f32> = rows.iter().map(|(_, g)| g.size().y.max(14.0) + 8.0).collect();
-    let head = 2.0 + 28.0 + title.size().y + if rows.is_empty() { 0.0 } else { 10.0 };
+    let head = 2.0 + 28.0 + title_h + if rows.is_empty() { 0.0 } else { 10.0 };
     let first = first_row(&heights, WIN_H - MARGIN - pill.top() - head);
     let full = panel_rect(pill, head + heights[first..].iter().sum::<f32>(), side);
 
@@ -125,8 +128,13 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
     let p = p.with_clip_rect(r.shrink(1.0));
     let x = full.left() + 17.0;
     let mut y = full.top() + 15.0;
-    p.galley(pos2(x, y), title.clone(), FG);
-    y += title.size().y + 10.0;
+    let cy = y + title_h / 2.0;
+    if let Some(px) = row.parent {
+        p.galley(pos2(x + px, cy - parent.size().y / 2.0), parent, FG3);
+        chevron(&p, pos2(x + row.chevron, cy), 8.0, FG3);
+    }
+    p.galley(pos2(x + row.name, y), name, FG);
+    y += title_h + 10.0;
     for ((icon, g), h) in rows.into_iter().zip(heights).skip(first) {
         let c = pos2(x + 7.0, y + h / 2.0);
         match icon {
@@ -213,6 +221,30 @@ fn layout(p: &Painter, parts: &[(&str, TextFormat)], width: f32, rows: usize) ->
 }
 
 /// 14 px green circle with a dark check (island-left.html .chk).
+/// Right-pointing chevron, `size` px tall, drawn as two 1.5 px segments.
+fn chevron(p: &Painter, center: Pos2, size: f32, color: Color32) {
+    let (h, w) = (size / 2.0, size / 4.0);
+    let st = Stroke::new(1.5, color);
+    p.line_segment([center + vec2(-w / 2.0, -h), center + vec2(w / 2.0, 0.0)], st);
+    p.line_segment([center + vec2(w / 2.0, 0.0), center + vec2(-w / 2.0, h)], st);
+}
+
+/// Title row x offsets from the row's left edge: parent (None when empty or too wide, dropped first),
+/// chevron center, and name. Layout: parent, 8 px, 4 px chevron, 8 px, name.
+pub struct TitleRow {
+    pub parent: Option<f32>,
+    pub chevron: f32,
+    pub name: f32,
+}
+
+pub fn title_row(parent_w: f32, name_w: f32, avail: f32) -> TitleRow {
+    if parent_w > 0.0 && parent_w + 20.0 + name_w <= avail {
+        TitleRow { parent: Some(0.0), chevron: parent_w + 8.0 + 2.0, name: parent_w + 20.0 }
+    } else {
+        TitleRow { parent: None, chevron: 0.0, name: 0.0 }
+    }
+}
+
 fn check(p: &Painter, c: Pos2) {
     p.circle_filled(c, 7.0, OK);
     let pts = vec![c + vec2(-3.0, 0.2), c + vec2(-1.0, 2.2), c + vec2(3.0, -2.0)];
@@ -319,7 +351,7 @@ fn card(ui: &mut egui::Ui, core: &Core, s: &Session, key: impl Hash + std::fmt::
     let inner = CARD_W - 2.0 - 32.0;
     let corner = corner.map(|c| layout(&p, &[(&c, fmt(11.0, "geist", FG3))], inner, 1));
     let cw = corner.as_ref().map_or(0.0, |g| g.size().x + 8.0);
-    let title = layout(&p, &[(&s.project, fmt(14.0, "geist", SESSION[s.color % SESSION.len()]))], inner - 30.0 - cw, 1);
+    let title = layout(&p, &[(&s.project, fmt(14.0, "geist", FG))], inner - 30.0 - cw, 1);
     let meta = layout(&p, &[(meta, fmt(12.0, "geist", FG2))], inner, 2);
     let cmd = cmd.map(|c| {
         let mut f = fmt(12.0, "geist-mono", FG);
@@ -450,7 +482,7 @@ pub fn finished_pill(ui: &mut egui::Ui, core: &Core, pill: Rect, side: Side) -> 
     let sessions = &core.state.sessions;
     let Some((i, bold, muted)) = finished_label(sessions) else { return (Rect::NOTHING, None) };
     let p = ui.painter().clone();
-    let g = layout(&p, &[(&bold, fmt(12.5, "geist", SESSION[sessions[i].color % SESSION.len()])), (" ", fmt(12.5, "geist", FG2)), (muted, fmt(12.5, "geist", FG2))], f32::INFINITY, 1);
+    let g = layout(&p, &[(&bold, fmt(12.5, "geist", FG)), (" ", fmt(12.5, "geist", FG2)), (muted, fmt(12.5, "geist", FG2))], f32::INFINITY, 1);
     let r = label_rect(pill, i, g.size() + vec2(26.0, 14.0), side);
     p.add(Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(115) }.as_shape(r, r.height() / 2.0));
     p.rect(r, r.height() / 2.0, BG, Stroke::new(1.0, LINE), StrokeKind::Inside);
@@ -491,7 +523,7 @@ pub fn of_n(q: &VecDeque<Permission>) -> Option<String> {
     (n > 1).then(|| format!("1 of {n}"))
 }
 
-/// (index of the topmost finished blob, bold part (session color), muted part) for the finished label.
+/// (index of the topmost finished blob, bold part, muted part) for the finished label.
 pub fn finished_label(sessions: &[Session]) -> Option<(usize, String, &'static str)> {
     let done: Vec<usize> = (0..sessions.len()).filter(|&i| BlobState::of(sessions[i].status, sessions[i].finished) == BlobState::Done).collect();
     let &i = done.first()?;
@@ -557,9 +589,19 @@ mod tests {
 
     fn sess(id: &str, changed_at: u64) -> Session {
         Session {
-            id: id.into(), project: id.into(), cwd: String::new(), transcript: String::new(), color: 0, status: Status::Idle,
+            id: id.into(), parent: String::new(), project: id.into(), cwd: String::new(), transcript: String::new(), color: 0, status: Status::Idle,
             todos: vec![], finished: None, claude_pid: None, terminal_pid: None, changed_at,
         }
+    }
+
+    #[test]
+    fn title_chevron_sits_between_parent_and_name() {
+        let r = title_row(40.0, 80.0, 200.0);
+        assert_eq!(r.parent, Some(0.0));
+        assert!(r.chevron > 40.0 && r.chevron < r.name);
+        assert_eq!(r.name - (r.chevron + 2.0), 8.0);
+        assert!(title_row(0.0, 80.0, 200.0).parent.is_none());
+        assert!(title_row(150.0, 80.0, 200.0).parent.is_none());
     }
 
     #[test]
