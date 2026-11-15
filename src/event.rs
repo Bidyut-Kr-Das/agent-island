@@ -18,6 +18,8 @@ pub struct HookEvent {
 pub enum TodoChange {
     Replace(Vec<Todo>),
     Upsert(Todo),
+    // Like Upsert but ignored when the id is unknown.
+    Update(Todo),
     SetStatus { id: String, status: TodoStatus },
     Rename { id: String, subject: String },
     Remove(String),
@@ -62,7 +64,7 @@ pub fn todo_change(ev: &HookEvent) -> Option<TodoChange> {
             let raw_status = str_of(input, "status");
             match (subject, raw_status) {
                 (Some(subject), Some(s)) => {
-                    Some(TodoChange::Upsert(Todo { id, subject, status: status(&s)? }))
+                    Some(TodoChange::Update(Todo { id, subject, status: status(&s)? }))
                 }
                 (Some(subject), None) => Some(TodoChange::Rename { id, subject }),
                 (None, Some(s)) => Some(match status(&s) {
@@ -147,7 +149,7 @@ mod tests {
         ev.tool_input = serde_json::json!({"taskId": "1", "subject": "New", "status": "completed"});
         assert_eq!(
             todo_change(&ev),
-            Some(TodoChange::Upsert(todo("1", "New", TodoStatus::Completed)))
+            Some(TodoChange::Update(todo("1", "New", TodoStatus::Completed)))
         );
     }
 

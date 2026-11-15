@@ -86,6 +86,11 @@ fn apply_todo(todos: &mut Vec<Todo>, change: TodoChange) {
             Some(x) => *x = t,
             None => todos.push(t),
         },
+        TodoChange::Update(t) => {
+            if let Some(x) = todos.iter_mut().find(|x| x.id == t.id) {
+                *x = t;
+            }
+        }
         TodoChange::SetStatus { id, status } => {
             if let Some(x) = todos.iter_mut().find(|x| x.id == id) {
                 x.status = status;
@@ -454,6 +459,19 @@ mod tests {
             "tool_input": {"todos": [{"content": "A", "status": "pending"}]}}));
         assert_eq!(s.sessions[0].todos[0].subject, "A");
         assert_eq!(s.sessions[0].todos.len(), 1);
+    }
+
+    #[test]
+    fn task_update_with_subject_for_unknown_id_is_ignored() {
+        let mut s = State::default();
+        go(&mut s, "PostToolUse", "a", json!({"tool_name": "TaskUpdate",
+            "tool_input": {"taskId": "9", "subject": "Ghost", "status": "completed"}}));
+        assert!(s.sessions[0].todos.is_empty());
+        go(&mut s, "PostToolUse", "a", json!({"tool_name": "TaskCreate",
+            "tool_input": {"subject": "X"}, "tool_response": {"task": {"id": "1"}}}));
+        go(&mut s, "PostToolUse", "a", json!({"tool_name": "TaskUpdate",
+            "tool_input": {"taskId": "1", "subject": "Y", "status": "completed"}}));
+        assert_eq!(s.sessions[0].todos, vec![Todo { id: "1".into(), subject: "Y".into(), status: TodoStatus::Completed }]);
     }
 
     #[test]
