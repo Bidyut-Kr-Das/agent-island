@@ -310,23 +310,30 @@ pub fn btn_id(key: impl Hash + std::fmt::Debug, k: usize) -> Id {
 pub struct Arming {
     pub req: u64,
     pub appeared: f64,
-    /// The cursor has been off the card since it appeared.
+    /// The cursor has been off the card since it appeared (or since the card last slid under it).
     outside: bool,
-    /// The cursor came onto the card from outside after it appeared.
+    /// The cursor moved onto the card from outside after it appeared.
     pub entered: bool,
+    /// Cursor position last frame.
+    last: Option<Pos2>,
 }
 
 impl Arming {
-    pub fn new(req: u64, appeared: f64, over: bool) -> Arming {
-        Arming { req, appeared, outside: !over, entered: false }
+    pub fn new(req: u64, appeared: f64, over: bool, cursor: Option<Pos2>) -> Arming {
+        Arming { req, appeared, outside: !over, entered: false, last: cursor }
     }
 
-    /// Feeds whether the cursor is over the card this frame.
-    pub fn update(&mut self, over: bool) {
+    /// Feeds whether the cursor is over the card this frame, and where it is. Coming over the card
+    /// without the cursor moving means the card moved under it: that needs a fresh leave and re-enter.
+    pub fn update(&mut self, over: bool, cursor: Option<Pos2>) {
+        let moved = cursor != self.last;
+        self.last = cursor;
         if !over {
             self.outside = true;
-        } else if self.outside {
+        } else if self.outside && moved {
             self.entered = true;
+        } else {
+            self.outside = false;
         }
     }
 }
@@ -626,10 +633,15 @@ mod tests {
         assert!(!armed(10.0, 10.59, true));
     }
 
+    /// Cursor positions for tests: a different point on each call means the cursor moved.
+    fn at(x: f32) -> Option<Pos2> {
+        Some(pos2(x, 100.0))
+    }
+
     #[test]
     fn press_after_600ms_with_entry_counts() {
-        let mut a = Arming::new(1, 10.0, false);
-        a.update(true);
+        let mut a = Arming::new(1, 10.0, false, at(0.0));
+        a.update(true, at(60.0));
         assert!(a.entered);
         assert!(armed(a.appeared, 10.6, a.entered));
         assert!(!armed(a.appeared, 10.6, false), "no entry, no click");
@@ -637,23 +649,38 @@ mod tests {
 
     #[test]
     fn cursor_already_over_card_needs_leave_and_reenter() {
-        let mut a = Arming::new(1, 10.0, true);
-        a.update(true);
-        assert!(!a.entered, "still resting where the card appeared");
+        let mut a = Arming::new(1, 10.0, true, at(60.0));
+        a.update(true, at(61.0));
+        assert!(!a.entered, "still where the card appeared, even if it wiggles");
         assert!(!armed(a.appeared, 12.0, a.entered));
-        a.update(false);
+        a.update(false, at(0.0));
         assert!(!a.entered, "left, not yet back");
-        a.update(true);
+        a.update(true, at(60.0));
         assert!(a.entered);
-        a.update(false);
+        a.update(false, at(0.0));
         assert!(a.entered, "stays armed once entered");
         assert!(armed(a.appeared, 12.0, a.entered));
     }
 
     #[test]
+    fn card_moving_under_still_cursor_does_not_arm() {
+        let mut a = Arming::new(1, 10.0, false, at(60.0));
+        a.update(false, at(60.0));
+        a.update(true, at(60.0)); // the card slid up under the resting cursor
+        assert!(!a.entered);
+        a.update(true, at(62.0));
+        assert!(!a.entered, "moving inside after the slide is not an entry");
+        a.update(false, at(0.0));
+        a.update(true, at(60.0));
+        assert!(a.entered, "a real leave and re-enter arms");
+        a.update(true, at(60.0));
+        assert!(a.entered, "resting on the button after entering stays armed");
+    }
+
+    #[test]
     fn release_late_but_press_early_ignored() {
-        let mut a = Arming::new(1, 10.0, false);
-        a.update(true);
+        let mut a = Arming::new(1, 10.0, false, at(0.0));
+        a.update(true, at(60.0));
         // Pressed on the frame at 10.2, still held at 10.5, released on the frame at 11.0.
         let p = press_time(f64::NEG_INFINITY, true, Some(10.2), 10.2);
         let p = press_time(p, false, Some(10.2), 10.5);

@@ -201,11 +201,11 @@ impl eframe::App for App {
                 let shown = self.arming.filter(|a| a.req == id).is_some_and(|a| views::armed(a.appeared, t, a.entered));
                 let (rect, mut reply) = views::permission_card(ui, &self.core, id, shown, r, t);
                 let over = cursor.is_some_and(|p| rect.contains(p));
-                let a = self.arming.get_or_insert(views::Arming::new(id, t, over));
+                let a = self.arming.get_or_insert(views::Arming::new(id, t, over, cursor));
                 if a.req != id {
-                    *a = views::Arming::new(id, t, over);
+                    *a = views::Arming::new(id, t, over, cursor);
                 }
-                a.update(over);
+                a.update(over, cursor);
                 let a = *a;
                 if !views::armed(a.appeared, self.press_at, a.entered) {
                     reply = None;
