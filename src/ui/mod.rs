@@ -95,6 +95,8 @@ pub fn run() {
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
             let RawWindowHandle::Win32(h) = cc.window_handle()?.as_raw() else { return Err("not win32".into()) };
             let hwnd = HWND(h.hwnd.get() as *mut _);
+            win::sync_style(hwnd, true);
+            win::no_frame(hwnd);
             win::place(hwnd);
             theme::setup_fonts(&cc.egui_ctx);
             let _ = CTX.set(cc.egui_ctx.clone());
@@ -147,6 +149,16 @@ mod win {
     use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     use windows::Win32::UI::WindowsAndMessaging::*;
 
+    /// No Windows 11 border or rounded corners around the transparent window.
+    pub fn no_frame(hwnd: HWND) {
+        use windows::Win32::Graphics::Dwm::*;
+        let (color, corner) = (DWMWA_COLOR_NONE, DWMWCP_DONOTROUND);
+        unsafe {
+            let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &color as *const _ as *const _, 4);
+            let _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner as *const _ as *const _, 4);
+        }
+    }
+
     /// Top-left of the pill at (8, 96) logical px inside the primary monitor's work area.
     pub fn place(hwnd: HWND) {
         let mut work = RECT::default();
@@ -172,21 +184,28 @@ mod win {
         Some(Pos2::new((p.x - r.left) as f32 / ppp, (p.y - r.top) as f32 / ppp))
     }
 
-    /// Never activate, no taskbar or Alt+Tab entry, click-through when `passthrough`.
-    /// winit rewrites GWL_EXSTYLE whenever its own flags change (e.g. on first show), so this
+    /// Never activate, no taskbar or Alt+Tab entry, always layered; only TRANSPARENT (click-through) toggles.
+    /// winit rewrites GWL_EXSTYLE whenever its own flags change (e.g. on first show), so sync_style
     /// runs every frame and owns passthrough instead of ViewportCommand::MousePassthrough.
+    pub fn ex_style(cur: isize, passthrough: bool) -> isize {
+        let t = WS_EX_TRANSPARENT.0 as isize;
+        let want = (cur | (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED).0 as isize) & !(WS_EX_APPWINDOW.0 as isize);
+        if passthrough { want | t } else { want & !t }
+    }
+
     pub fn sync_style(hwnd: HWND, passthrough: bool) {
-        let through = (WS_EX_TRANSPARENT | WS_EX_LAYERED).0 as isize;
         unsafe {
             let cur = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            let mut want = (cur | (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW).0 as isize) & !(WS_EX_APPWINDOW.0 as isize);
-            want = if passthrough { want | through } else { want & !through };
-            if want != cur {
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
-                if passthrough {
-                    // Without this a layered GL window composites see-through (text behind shows through the pill).
-                    let _ = SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 255, LWA_ALPHA);
-                }
+            let want = ex_style(cur, passthrough);
+            if want == cur {
+                return;
+            }
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
+            if cur & WS_EX_LAYERED.0 as isize == 0 {
+                // Only when LAYERED is (re)applied: winit drops it whenever it rewrites the style (e.g. first show).
+                // Without LWA_ALPHA a layered GL window composites see-through.
+                let _ = SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 255, LWA_ALPHA);
+                let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             }
         }
     }
@@ -228,6 +247,20 @@ mod tests {
         c.handle(Msg::Timeout(id), 2);
         assert!(c.state.permissions[0].timed_out);
         assert!(c.replies.is_empty());
+    }
+
+    #[test]
+    fn ex_style_keeps_layered_and_toggles_only_transparent() {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        let has = |s: isize, f: WINDOW_EX_STYLE| s & f.0 as isize != 0;
+        let start = (WS_EX_APPWINDOW | WS_EX_TOPMOST).0 as isize;
+        for through in [true, false] {
+            let s = win::ex_style(start, through);
+            assert!(has(s, WS_EX_LAYERED), "layered stays on (through={through})");
+            assert!(has(s, WS_EX_NOACTIVATE) && has(s, WS_EX_TOOLWINDOW) && has(s, WS_EX_TOPMOST));
+            assert!(!has(s, WS_EX_APPWINDOW));
+            assert_eq!(has(s, WS_EX_TRANSPARENT), through);
+        }
     }
 
     #[test]
