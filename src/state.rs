@@ -79,17 +79,10 @@ pub struct State {
     next_req: u64,
 }
 
-/// Folder name as a title: split on `-`, `_`, `.` and spaces, capitalize each word's first char, join with a space.
+/// Folder name with its first letter capitalized; the rest is unchanged.
 pub fn pretty(folder: &str) -> String {
-    let words: Vec<String> = folder
-        .split(['-', '_', '.', ' '])
-        .filter(|w| !w.is_empty())
-        .map(|w| {
-            let mut c = w.chars();
-            c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
-        })
-        .collect();
-    words.join(" ")
+    let mut c = folder.chars();
+    c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
 }
 
 /// Session label as (parent, name): the last two folders of the repo root above `cwd` (or of `cwd` itself), prettified.
@@ -348,7 +341,7 @@ mod tests {
         let mut s = State::default();
         go(&mut s, "SessionStart", "a", json!({}));
         assert_eq!(s.sessions.len(), 1);
-        assert_eq!((s.sessions[0].parent.as_str(), s.sessions[0].project.as_str()), ("Projects", "Payments Api"));
+        assert_eq!((s.sessions[0].parent.as_str(), s.sessions[0].project.as_str()), ("Projects", "Payments-api"));
         assert_eq!(s.sessions[0].status, Status::Idle);
         assert_eq!(s.sessions[0].transcript, "t.jsonl");
     }
@@ -361,8 +354,8 @@ mod tests {
 
     #[test]
     fn pretty_title_cases_words() {
-        assert_eq!(pretty("os-bots-worker"), "Os Bots Worker");
-        assert_eq!(pretty("openscholar_bots.v2"), "Openscholar Bots V2");
+        assert_eq!(pretty("os-bots-worker"), "Os-bots-worker");
+        assert_eq!(pretty("openscholar_bots.v2"), "Openscholar_bots.v2");
         assert_eq!(pretty("bots"), "Bots");
         assert_eq!(pretty(""), "");
         assert_eq!(pretty("API"), "API");
@@ -419,8 +412,8 @@ mod tests {
 
     #[test]
     fn display_parts_trailing_and_forward_slashes() {
-        assert_eq!(parts(r"D:\projects\x-app\"), pair("Projects", "X App"));
-        assert_eq!(parts("/home/me/y-app"), pair("Me", "Y App"));
+        assert_eq!(parts(r"D:\projects\x-app\"), pair("Projects", "X-app"));
+        assert_eq!(parts("/home/me/y-app"), pair("Me", "Y-app"));
     }
 
     #[test]
