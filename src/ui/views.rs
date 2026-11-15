@@ -1,10 +1,12 @@
 use super::Core;
-use crate::state::{Session, Todo, TodoStatus};
+use crate::state::{Finish, Permission, Session, Todo, TodoStatus, WaitKind};
+use std::collections::VecDeque;
 use super::blob::{BlobState, paint_blob};
-use super::theme::{BG, FG, FG2, FG3, LINE, OK, SESSION};
+use super::theme::{BG, FG, FG2, FG3, LINE, OK, SESSION, WARN};
+use crate::hook::Reply;
 use crate::state::Status;
 use eframe::egui::text::{LayoutJob, TextFormat, TextWrapping};
-use eframe::egui::{self, Color32, FontFamily, FontId, Galley, Id, Painter, Pos2, Rect, Sense, Shadow, Shape, Stroke, StrokeKind, pos2, vec2};
+use eframe::egui::{self, Color32, FontFamily, FontId, Galley, Id, Painter, Pos2, Rect, Sense, Shadow, Shape, Stroke, StrokeKind, Vec2, pos2, vec2};
 use std::sync::Arc;
 
 /// The pill's top-left inside the window; the margin keeps the shadow from being cut off.
@@ -16,6 +18,7 @@ const PAD_Y: f32 = 10.0;
 const PAD_X: f32 = 5.0;
 const PILL_W: f32 = BLOB + 2.0 * PAD_X + 2.0;
 const PANEL_W: f32 = 300.0;
+const CARD_W: f32 = 280.0;
 const WIN_H: f32 = 520.0;
 
 /// Outer pill height for `n` blobs (island-left.html .vpill: 1 px border, 10 px padding, 22 px blobs, 6 px gap).
@@ -75,18 +78,7 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
 
     // island-left.html .box: 1 px border, 14 / 16 px padding; todo rows 4 px padding, 14 px icon, 10 px gap.
     let inner = PANEL_W - 2.0 - 32.0;
-    let text = |s: &str, size: f32, family: &str, color: Color32, width: f32| -> Arc<Galley> {
-        let mut f = TextFormat::simple(FontId::new(size, FontFamily::Name(family.into())), color);
-        if family == "geist-semibold" {
-            f.extra_letter_spacing = -0.01 * size;
-        }
-        if family == "geist-mono" {
-            f.line_height = Some(size * 1.4);
-        }
-        let mut job = LayoutJob::single_section(s.into(), f);
-        job.wrap = TextWrapping { max_width: width, max_rows: 2, ..Default::default() };
-        ui.painter().layout_job(job)
-    };
+    let text = |s: &str, size: f32, family: &str, color: Color32, width: f32| layout(ui.painter(), &[(s, fmt(size, family, color))], width, 2);
     let title = text(&s.project, 14.0, "geist-semibold", FG, inner);
     let path = text(&s.cwd, 11.0, "geist-mono", FG3, inner);
     // icon: Some(true) check, Some(false) spinner, None none.
@@ -137,6 +129,28 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
     r
 }
 
+/// Text format for the mockup's type styles (semibold is tracked -.01em, mono has 1.4 line height).
+fn fmt(size: f32, family: &str, color: Color32) -> TextFormat {
+    let mut f = TextFormat::simple(FontId::new(size, FontFamily::Name(family.into())), color);
+    if family == "geist-semibold" {
+        f.extra_letter_spacing = -0.01 * size;
+    }
+    if family == "geist-mono" {
+        f.line_height = Some(size * 1.4);
+    }
+    f
+}
+
+/// Lays out `parts` within `width`, at most `rows` rows, cut with an ellipsis.
+fn layout(p: &Painter, parts: &[(&str, TextFormat)], width: f32, rows: usize) -> Arc<Galley> {
+    let mut job = LayoutJob::default();
+    for (s, f) in parts {
+        job.append(s, 0.0, f.clone());
+    }
+    job.wrap = TextWrapping { max_width: width, max_rows: rows, break_anywhere: rows == 1, ..Default::default() };
+    p.layout_job(job)
+}
+
 /// 14 px green circle with a dark check (island-left.html .chk).
 fn check(p: &Painter, c: Pos2) {
     p.circle_filled(c, 7.0, OK);
@@ -177,7 +191,7 @@ pub fn outside_click(was_down: bool, down: bool, inside: bool) -> bool {
     down && !was_down && !inside
 }
 
-/// Cursor over the pill or the open panel (ponytail: panel corners count as square).
+/// Cursor over the pill or the open panel, card or label (ponytail: their corners count as square).
 pub fn inside(p: Pos2, pill: Rect, panel: Rect) -> bool {
     hit(p, pill) || panel.contains(p)
 }
@@ -210,6 +224,163 @@ pub fn first_row(heights: &[f32], avail: f32) -> usize {
 pub fn spring(x: f32) -> f32 {
     let f = |x: f32| 1.0 - (1.0 + 8.0 * x) * (-8.0 * x).exp();
     if x >= 1.0 { 1.0 } else { f(x.max(0.0)) / f(1.0) }
+}
+
+const BTN_BG: Color32 = Color32::from_rgb(0x1d, 0x1d, 0x21);
+const CMD_BG: Color32 = Color32::from_rgb(0x17, 0x17, 0x1a);
+const DENY: Color32 = Color32::from_rgb(0xff, 0x4d, 0x4d);
+const ALLOW_FG: Color32 = Color32::from_rgb(0x06, 0x14, 0x0d);
+
+/// A card button: label, fill, text color, 1 px border.
+type Btn<'a> = (&'a str, Color32, Color32, bool);
+
+/// Card beside session `s`'s blob (island-blob.html states 4 and 5, island-left.html state 3 placement):
+/// waiting blob and project, `meta`, optional command box, buttons. Returns its rect and the clicked button.
+#[allow(clippy::too_many_arguments)]
+fn card(ui: &mut egui::Ui, core: &Core, s: &Session, meta: &str, corner: Option<String>, cmd: Option<&Permission>, btns: &[Btn], pill: Rect, t: f64) -> (Rect, Option<usize>) {
+    let p = ui.painter().clone();
+    let inner = CARD_W - 2.0 - 32.0;
+    let corner = corner.map(|c| layout(&p, &[(&c, fmt(11.0, "geist", FG3))], inner, 1));
+    let cw = corner.as_ref().map_or(0.0, |g| g.size().x + 8.0);
+    let title = layout(&p, &[(&s.project, fmt(14.0, "geist-semibold", FG))], inner - 30.0 - cw, 1);
+    let meta = layout(&p, &[(meta, fmt(12.0, "geist", FG2))], inner, 2);
+    let cmd = cmd.map(|c| {
+        let mut f = fmt(12.0, "geist-mono", FG);
+        f.line_height = Some(12.0 * 1.3);
+        let tool = TextFormat { color: WARN, ..f.clone() };
+        (c, layout(&p, &[(&c.tool, tool), ("\u{a0} ", f.clone()), (&c.detail, f)], inner - 22.0, 1))
+    });
+    let cmd_h = cmd.as_ref().map_or(0.0, |(_, g)| 10.0 + 18.0 + g.size().y);
+    let btn_h = 31.0;
+    let h = 15.0 + 20.0 + 6.0 + meta.size().y + cmd_h + 12.0 + btn_h + 15.0;
+    let i = core.state.sessions.iter().position(|x| x.id == s.id).unwrap_or(0);
+    let r = card_rect(pill, i, h);
+
+    p.add(Shadow { offset: [0, 12], blur: 32, spread: 0, color: Color32::from_black_alpha(128) }.as_shape(r, 8.0));
+    p.rect(r, 8.0, BG, Stroke::new(1.0, LINE), StrokeKind::Inside);
+    let x = r.left() + 17.0;
+    let mut y = r.top() + 15.0;
+    paint_blob(&p, pos2(x + 10.0, y + 20.0), 20.0, SESSION[s.color % SESSION.len()], BlobState::Waiting, t);
+    p.galley(pos2(x + 30.0, y + 10.0 - title.size().y / 2.0), title, FG);
+    if let Some(g) = corner {
+        p.galley(pos2(x + inner - g.size().x, y + 10.0 - g.size().y / 2.0), g, FG3);
+    }
+    y += 26.0;
+    p.galley(pos2(x, y), meta.clone(), FG2);
+    y += meta.size().y;
+    if let Some((c, g)) = cmd {
+        y += 10.0;
+        let b = Rect::from_min_size(pos2(x, y), vec2(inner, cmd_h - 10.0));
+        p.rect(b, 4.0, CMD_BG, Stroke::new(1.0, LINE), StrokeKind::Inside);
+        p.galley(pos2(x + 11.0, y + 9.0), g, FG);
+        ui.interact(b, Id::unique(("cmd", c.req_id)), Sense::hover()).on_hover_text(&c.full);
+        y += cmd_h - 10.0;
+    }
+    y += 12.0;
+    let n = btns.len() as f32;
+    let w = (inner - 8.0 * (n - 1.0)) / n;
+    let mut clicked = None;
+    for (k, &(label, fill, color, border)) in btns.iter().enumerate() {
+        let b = Rect::from_min_size(pos2(x + k as f32 * (w + 8.0), y), vec2(w, btn_h));
+        let stroke = if border { Stroke::new(1.0, LINE) } else { Stroke::NONE };
+        p.rect(b, 4.0, fill, stroke, StrokeKind::Inside);
+        let g = layout(&p, &[(label, fmt(12.5, "geist-medium", color))], w, 1);
+        p.galley(b.center() - g.size() / 2.0, g, color);
+        if ui.interact(b, Id::unique(("btn", &s.id, k)), Sense::click()).clicked() {
+            clicked = clicked.or(Some(k));
+        }
+    }
+    (r, clicked)
+}
+
+/// Permission card for `req_id` (spec 7.4). Returns its rect and the user's answer, if clicked this frame.
+pub fn permission_card(ui: &mut egui::Ui, core: &Core, req_id: u64, pill: Rect, t: f64) -> (Rect, Option<Reply>) {
+    let st = &core.state;
+    let Some(perm) = st.permissions.iter().find(|p| p.req_id == req_id) else { return (Rect::NOTHING, None) };
+    let Some(s) = st.sessions.iter().find(|s| s.id == perm.session_id) else { return (Rect::NOTHING, None) };
+    let btns = [("Deny", BTN_BG, DENY, true), ("Allow", OK, ALLOW_FG, false)];
+    let (r, k) = card(ui, core, s, &perm.verb, of_n(&st.permissions), Some(perm), &btns, pill, t);
+    (r, k.map(|k| if k == 0 { Reply::Deny } else { Reply::Allow }))
+}
+
+/// Waiting card for session `id` (spec 7.5). Returns its rect and whether "Go to terminal" was clicked.
+pub fn waiting_card(ui: &mut egui::Ui, core: &Core, id: &str, pill: Rect, t: f64) -> (Rect, bool) {
+    let Some(s) = core.state.sessions.iter().find(|s| s.id == id) else { return (Rect::NOTHING, false) };
+    let (r, k) = card(ui, core, s, waiting_text(s.status), None, None, &[("Go to terminal", BTN_BG, FG, true)], pill, t);
+    (r, k.is_some())
+}
+
+/// Finished label beside the topmost finished blob (spec 7.6, island-left.html state 4).
+/// Returns its rect and the session to open when clicked.
+pub fn finished_pill(ui: &mut egui::Ui, core: &Core, pill: Rect) -> (Rect, Option<String>) {
+    let sessions = &core.state.sessions;
+    let Some((i, bold, muted)) = finished_label(sessions) else { return (Rect::NOTHING, None) };
+    let p = ui.painter().clone();
+    let g = layout(&p, &[(&bold, fmt(12.5, "geist-semibold", FG)), (" ", fmt(12.5, "geist", FG2)), (muted, fmt(12.5, "geist", FG2))], f32::INFINITY, 1);
+    let r = label_rect(pill, i, g.size() + vec2(26.0, 14.0));
+    p.add(Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(115) }.as_shape(r, r.height() / 2.0));
+    p.rect(r, r.height() / 2.0, BG, Stroke::new(1.0, LINE), StrokeKind::Inside);
+    p.galley(r.center() - g.size() / 2.0, g, FG);
+    let clicked = ui.interact(r, Id::unique("finished"), Sense::click()).clicked();
+    (r, clicked.then(|| sessions[i].id.clone()))
+}
+
+#[derive(Debug, PartialEq)]
+pub enum View {
+    Pill,
+    Panel,
+    Permission(u64),
+    Waiting(String),
+}
+
+/// Oldest pending permission, then any waiting session, then the panel if expanded, else the bare pill.
+pub fn current_view(core: &Core, expanded: bool) -> View {
+    let st = &core.state;
+    if let Some(p) = st.permissions.iter().find(|p| !p.timed_out) {
+        View::Permission(p.req_id)
+    } else if let Some(s) = st.sessions.iter().find(|s| matches!(s.status, Status::Waiting(_))) {
+        View::Waiting(s.id.clone())
+    } else if expanded {
+        View::Panel
+    } else {
+        View::Pill
+    }
+}
+
+pub fn waiting_text(s: Status) -> &'static str {
+    if s == Status::Waiting(WaitKind::Question) { "Has a question for you" } else { "Waiting for you" }
+}
+
+/// "1 of N" when more than one permission is pending (the card always shows the oldest).
+pub fn of_n(q: &VecDeque<Permission>) -> Option<String> {
+    let n = q.iter().filter(|p| !p.timed_out).count();
+    (n > 1).then(|| format!("1 of {n}"))
+}
+
+/// (index of the topmost finished blob, semibold part, muted part) for the finished label.
+pub fn finished_label(sessions: &[Session]) -> Option<(usize, String, &'static str)> {
+    let done: Vec<usize> = (0..sessions.len()).filter(|&i| BlobState::of(sessions[i].status, sessions[i].finished) == BlobState::Done).collect();
+    let &i = done.first()?;
+    Some(match (done.len(), sessions[i].finished) {
+        (1, Some(Finish::Error)) => (i, sessions[i].project.clone(), "stopped with an error"),
+        (1, _) => (i, sessions[i].project.clone(), "finished"),
+        (n, _) => (i, n.to_string(), "finished"),
+    })
+}
+
+fn blob_top(pill: Rect, i: usize) -> f32 {
+    pill.top() + 1.0 + PAD_Y + i as f32 * (BLOB + GAP)
+}
+
+/// Card 8 px right of the pill, top-aligned with blob `i`, moved up if needed to fit the window.
+pub fn card_rect(pill: Rect, i: usize, h: f32) -> Rect {
+    let top = blob_top(pill, i).min(WIN_H - MARGIN - h).max(MARGIN);
+    Rect::from_min_size(pos2(pill.right() + 8.0, top), vec2(CARD_W, h))
+}
+
+/// Label 8 px right of the pill, vertically centered on blob `i`.
+pub fn label_rect(pill: Rect, i: usize, size: Vec2) -> Rect {
+    Rect::from_min_size(pos2(pill.right() + 8.0, blob_top(pill, i) + BLOB / 2.0 - size.y / 2.0), size)
 }
 
 #[cfg(test)]
@@ -314,6 +485,81 @@ mod tests {
         assert_eq!(pill_height(0), 0.0);
         assert_eq!(pill_height(1), 44.0);
         assert_eq!(pill_height(4), 2.0 + 20.0 + 4.0 * 22.0 + 3.0 * 6.0);
+    }
+
+    fn perm(req_id: u64, sid: &str, timed_out: bool) -> crate::state::Permission {
+        crate::state::Permission {
+            req_id, session_id: sid.into(), tool: "Bash".into(), verb: "Wants to run a command".into(),
+            detail: "ls".into(), full: "ls".into(), timed_out,
+        }
+    }
+
+    #[test]
+    fn permission_beats_waiting_beats_panel() {
+        let mut c = Core::new();
+        c.state.sessions = vec![sess("a", 1), sess("b", 2)];
+        assert_eq!(current_view(&c, false), View::Pill);
+        assert_eq!(current_view(&c, true), View::Panel);
+        c.state.sessions[0].status = Status::Waiting(WaitKind::Question);
+        assert_eq!(current_view(&c, true), View::Waiting("a".into()));
+        c.state.sessions[1].status = Status::Waiting(WaitKind::Permission);
+        c.state.permissions.push_back(perm(7, "b", false));
+        c.state.permissions.push_back(perm(8, "b", false));
+        assert_eq!(current_view(&c, true), View::Permission(7), "oldest first");
+    }
+
+    #[test]
+    fn timed_out_permission_shows_waiting() {
+        let mut c = Core::new();
+        c.state.sessions = vec![sess("a", 1)];
+        c.state.sessions[0].status = Status::Waiting(WaitKind::Other);
+        c.state.permissions.push_back(perm(3, "a", true));
+        assert_eq!(current_view(&c, false), View::Waiting("a".into()));
+        assert_eq!(waiting_text(c.state.sessions[0].status), "Waiting for you");
+        assert_eq!(waiting_text(Status::Waiting(WaitKind::Question)), "Has a question for you");
+    }
+
+    #[test]
+    fn of_n_counts_pending_only_when_several() {
+        let mut q = std::collections::VecDeque::new();
+        q.push_back(perm(1, "a", false));
+        assert_eq!(of_n(&q), None);
+        q.push_back(perm(2, "a", true));
+        assert_eq!(of_n(&q), None, "timed out ones do not count");
+        q.push_back(perm(3, "b", false));
+        q.push_back(perm(4, "b", false));
+        assert_eq!(of_n(&q).as_deref(), Some("1 of 3"));
+    }
+
+    #[test]
+    fn finished_count_reflects_unseen() {
+        let mut v = vec![sess("a", 1), sess("b", 2), sess("c", 3)];
+        assert_eq!(finished_label(&v), None);
+        v[1].finished = Some(Finish::Ok);
+        assert_eq!(finished_label(&v), Some((1, "b".into(), "finished")));
+        v[1].finished = Some(Finish::Error);
+        assert_eq!(finished_label(&v), Some((1, "b".into(), "stopped with an error")));
+        v[2].finished = Some(Finish::Ok);
+        assert_eq!(finished_label(&v), Some((1, "2".into(), "finished")), "topmost blob, count");
+        v[1].status = Status::Working;
+        assert_eq!(finished_label(&v), Some((2, "c".into(), "finished")), "only idle finished blobs count");
+        v[2].finished = None; // mark_seen
+        assert_eq!(finished_label(&v), None);
+    }
+
+    #[test]
+    fn card_sits_8px_right_top_aligned_with_blob_and_fits() {
+        let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, pill_height(4)));
+        // Blob 2 top: 8 + 1 + 10 + 2 * 28.
+        assert_eq!(card_rect(pill, 2, 150.0), Rect::from_min_size(pos2(50.0, 75.0), vec2(280.0, 150.0)));
+        assert_eq!(card_rect(pill, 2, 480.0).bottom(), 520.0 - MARGIN, "pushed up to fit the window");
+    }
+
+    #[test]
+    fn label_centered_on_blob_8px_right() {
+        let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, pill_height(2)));
+        // Blob 1 center: 8 + 1 + 10 + 28 + 11 = 58.
+        assert_eq!(label_rect(pill, 1, vec2(120.0, 28.0)), Rect::from_min_size(pos2(50.0, 44.0), vec2(120.0, 28.0)));
     }
 
     #[test]

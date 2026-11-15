@@ -2,6 +2,9 @@ mod blob;
 mod theme;
 mod views;
 
+use blob::BlobState;
+use views::View;
+
 use crate::server::Msg;
 use crate::{event, hook::Reply, procs, state::State};
 use eframe::egui::{self, Pos2, ViewportBuilder, ViewportCommand};
@@ -43,7 +46,6 @@ impl Core {
         }
     }
 
-    #[allow(dead_code)] // the permission card (Task 7) calls this
     pub fn answer(&mut self, req_id: u64, r: Reply) {
         if let Some(tx) = self.replies.remove(&req_id) {
             let _ = tx.send(r);
@@ -102,7 +104,10 @@ pub fn run() {
             let _ = CTX.set(cc.egui_ctx.clone());
             // Test hook: AGENT_ISLANDS_OPEN=<session id> opens the panel on that session once it exists.
             let open_req = std::env::var("AGENT_ISLANDS_OPEN").ok();
-            Ok(Box::new(App { core: Core::new(), rx, hwnd, trimmed: false, selected: None, open_req, was_down: false }))
+            // Test hook: AGENT_ISLANDS_CLICK=allow|deny answers the first permission card 1 s after it shows.
+            let auto_click = std::env::var("AGENT_ISLANDS_CLICK").ok();
+            let app = App { core: Core::new(), rx, hwnd, trimmed: false, selected: None, open_req, was_down: false, auto_click, card_since: None };
+            Ok(Box::new(app))
         }),
     );
 }
@@ -115,6 +120,17 @@ struct App {
     selected: Option<String>,
     open_req: Option<String>,
     was_down: bool,
+    auto_click: Option<String>,
+    /// The permission card on screen and when it appeared (for AGENT_ISLANDS_CLICK).
+    card_since: Option<(u64, f64)>,
+}
+
+impl App {
+    /// Opens the panel on a finished session and marks it seen.
+    fn open_finished(&mut self, id: String) {
+        self.core.state.mark_seen(&id);
+        self.selected = Some(id);
+    }
 }
 
 impl eframe::App for App {
@@ -142,13 +158,60 @@ impl eframe::App for App {
         if let Some(id) = self.open_req.take_if(|id| sessions.iter().any(|s| &s.id == id)) {
             self.selected = Some(id);
         }
-        let pill = views::pill(ui, &self.core, self.selected.as_deref(), t);
+        let view = views::current_view(&self.core, self.selected.is_some());
+        // The bar marks the session a card is about (island-left.html state 3), else the selection.
+        let marked = match &view {
+            View::Permission(id) => self.core.state.permissions.iter().find(|p| p.req_id == *id).map(|p| p.session_id.clone()),
+            View::Waiting(id) => Some(id.clone()),
+            _ => self.selected.clone(),
+        };
+        let pill = views::pill(ui, &self.core, marked.as_deref(), t);
         if pill.clicked() {
-            let clicked = pill.interact_pointer_pos().and_then(|p| views::blob_at(p, pill.rect, sessions.len())).map(|i| sessions[i].id.as_str());
-            self.selected = views::toggle(self.selected.as_deref(), clicked, views::default_selection(sessions));
+            let sessions = &self.core.state.sessions;
+            let clicked = pill.interact_pointer_pos().and_then(|p| views::blob_at(p, pill.rect, sessions.len())).map(|i| &sessions[i]);
+            if let Some(s) = clicked.filter(|s| BlobState::of(s.status, s.finished) == BlobState::Done) {
+                let id = s.id.clone();
+                self.open_finished(id);
+            } else {
+                self.selected = views::toggle(self.selected.as_deref(), clicked.map(|s| s.id.as_str()), views::default_selection(sessions));
+            }
         }
         let r = pill.rect;
-        let panel = views::panel(ui, &self.core, &mut self.selected, r, t);
+        let panel = match view {
+            View::Permission(id) => {
+                let (rect, mut reply) = views::permission_card(ui, &self.core, id, r, t);
+                if self.card_since.is_none_or(|(c, _)| c != id) {
+                    self.card_since = Some((id, t));
+                }
+                if self.card_since.is_some_and(|(_, t0)| t - t0 >= 1.0) && let Some(c) = self.auto_click.take() {
+                    reply = reply.or(Some(if c == "deny" { Reply::Deny } else { Reply::Allow }));
+                }
+                if let Some(reply) = reply {
+                    self.core.answer(id, reply);
+                }
+                rect
+            }
+            View::Waiting(id) => {
+                let (rect, go) = views::waiting_card(ui, &self.core, &id, r, t);
+                let s = self.core.state.sessions.iter().find(|s| s.id == id);
+                if go && let Some(s) = s && let Some(pid) = s.terminal_pid {
+                    crate::focus::go_to_terminal(pid, s.title.as_deref());
+                }
+                rect
+            }
+            View::Panel | View::Pill => {
+                let panel = views::panel(ui, &self.core, &mut self.selected, r, t);
+                if panel.is_positive() {
+                    panel
+                } else {
+                    let (rect, open) = views::finished_pill(ui, &self.core, r);
+                    if let Some(id) = open {
+                        self.open_finished(id);
+                    }
+                    rect
+                }
+            }
+        };
         // egui sees no hover while passthrough is on, so ask Windows where the cursor is.
         let over = win::cursor(self.hwnd, ctx.pixels_per_point()).is_some_and(|p| views::inside(p, r, panel));
         win::sync_style(self.hwnd, !over);
@@ -264,6 +327,16 @@ mod tests {
         assert!(matches!(rx.try_recv(), Ok(Reply::Allow)));
         assert!(c.state.permissions.is_empty());
         assert!(c.replies.is_empty());
+    }
+
+    #[test]
+    fn answer_twice_sends_once() {
+        let mut c = Core::new();
+        let (rx, id) = event(&mut c, "PermissionRequest", "s", true).unwrap();
+        c.answer(id, Reply::Deny);
+        c.answer(id, Reply::Allow);
+        assert!(matches!(rx.try_recv(), Ok(Reply::Deny)));
+        assert!(rx.try_recv().is_err(), "second answer must not send");
     }
 
     #[test]

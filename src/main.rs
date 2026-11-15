@@ -2,6 +2,7 @@
 #[allow(dead_code)]
 mod detail;
 mod event;
+mod focus;
 mod hook;
 mod pipe;
 mod server;
