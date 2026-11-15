@@ -6,6 +6,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+use windows::Win32::Foundation::{HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation};
+use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 
 const DETACHED_PROCESS: u32 = 0x8;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -37,7 +39,17 @@ pub fn same_exe(a: &Path, b: &Path) -> bool {
     canon(a) == canon(b)
 }
 
+/// The island must not inherit Claude Code's stdio pipes, or the hook call never completes.
+fn no_inherit_std_handles() {
+    for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        if let Ok(h) = unsafe { GetStdHandle(id) } {
+            let _ = unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) };
+        }
+    }
+}
+
 fn spawn_island() {
+    no_inherit_std_handles();
     let Ok(exe) = std::env::current_exe() else { return };
     let go = |flags: u32| {
         Command::new(&exe)
@@ -202,5 +214,17 @@ mod tests {
         assert_eq!(run_with(&name, false, input), None);
         assert!(start.elapsed() < Duration::from_secs(3));
         t.join().unwrap();
+    }
+
+    #[test]
+    fn std_handles_are_made_non_inheritable() {
+        use windows::Win32::Foundation::{GetHandleInformation, HANDLE_FLAG_INHERIT, SetHandleInformation};
+        use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
+        let h = unsafe { GetStdHandle(STD_ERROR_HANDLE) }.unwrap();
+        unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT) }.unwrap();
+        no_inherit_std_handles();
+        let mut flags = 0u32;
+        unsafe { GetHandleInformation(h, &mut flags) }.unwrap();
+        assert_eq!(flags & HANDLE_FLAG_INHERIT.0, 0);
     }
 }

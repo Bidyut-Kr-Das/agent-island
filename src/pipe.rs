@@ -80,6 +80,8 @@ impl Server {
         let h = HANDLE(self.pending.as_raw_handle());
         if let Err(e) = unsafe { ConnectNamedPipe(h, None) } {
             if unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
+                // Broken instance (e.g. client closed early): replace it so the next accept works.
+                self.pending = create_instance(&self.name, false)?;
                 return Err(e.into());
             }
         }
@@ -134,5 +136,22 @@ mod tests {
         BufReader::new(&f).read_line(&mut reply).unwrap();
         assert_eq!(reply, "pong\n");
         assert_eq!(t.join().unwrap(), "ping\n");
+    }
+
+    #[test]
+    fn dropped_client_does_not_wedge_accept() {
+        let name = format!(r"\\.\pipe\ai-test-wedge-{}", std::process::id());
+        let mut server = Server::create_first_named(&name).unwrap();
+        drop(connect_to(&name).unwrap());
+        let _ = server.accept();
+        let t = std::thread::spawn(move || {
+            let f = server.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&f).read_line(&mut line).unwrap();
+            line
+        });
+        let (f, _) = connect_to(&name).unwrap();
+        (&f).write_all(b"hi\n").unwrap();
+        assert_eq!(t.join().unwrap(), "hi\n");
     }
 }
