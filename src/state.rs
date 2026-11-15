@@ -96,7 +96,13 @@ fn apply_todo(todos: &mut Vec<Todo>, change: TodoChange) {
         TodoChange::Replace(list) => *todos = list,
         TodoChange::Upsert(t) => match todos.iter_mut().find(|x| x.id == t.id) {
             Some(x) => *x = t,
-            None => todos.push(t),
+            None => {
+                // A new set after a finished one replaces it instead of growing the list.
+                if todos.iter().all(|x| x.status == TodoStatus::Completed) {
+                    todos.clear();
+                }
+                todos.push(t);
+            }
         },
         TodoChange::Update(t) => {
             if let Some(x) = todos.iter_mut().find(|x| x.id == t.id) {
@@ -628,6 +634,32 @@ mod tests {
         go(&mut s, "PostToolUse", "a", json!({"tool_name": "TaskUpdate",
             "tool_input": {"taskId": "1", "subject": "Y", "status": "completed"}}));
         assert_eq!(s.sessions[0].todos, vec![Todo { id: "1".into(), subject: "Y".into(), status: TodoStatus::Completed }]);
+    }
+
+    fn todo(id: &str, status: TodoStatus) -> Todo {
+        Todo { id: id.into(), subject: id.into(), status }
+    }
+
+    #[test]
+    fn new_task_after_all_done_starts_fresh_list() {
+        let mut todos = vec![todo("A", TodoStatus::Completed), todo("B", TodoStatus::Completed)];
+        apply_todo(&mut todos, TodoChange::Upsert(todo("C", TodoStatus::Pending)));
+        assert_eq!(todos, vec![todo("C", TodoStatus::Pending)]);
+    }
+
+    #[test]
+    fn new_task_while_some_open_appends() {
+        let mut todos = vec![todo("A", TodoStatus::Completed), todo("B", TodoStatus::InProgress)];
+        apply_todo(&mut todos, TodoChange::Upsert(todo("C", TodoStatus::Pending)));
+        let ids: Vec<_> = todos.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn upsert_existing_id_never_clears() {
+        let mut todos = vec![todo("A", TodoStatus::Completed)];
+        apply_todo(&mut todos, TodoChange::Upsert(todo("A", TodoStatus::Pending)));
+        assert_eq!(todos, vec![todo("A", TodoStatus::Pending)]);
     }
 
     #[test]
