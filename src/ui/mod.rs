@@ -224,7 +224,11 @@ impl eframe::App for App {
                 let (rect, go) = views::waiting_card(ui, &self.core, &id, r, t);
                 let s = self.core.state.sessions.iter().find(|s| s.id == id);
                 if go && let Some(s) = s && let Some(pid) = s.terminal_pid {
-                    crate::focus::go_to_terminal(pid, s.title.as_deref());
+                    // Off the UI thread: UI Automation can be slow, and the island must not freeze.
+                    let transcript = std::path::PathBuf::from(&s.transcript);
+                    std::thread::spawn(move || {
+                        crate::focus::go_to_terminal(pid, crate::focus::ai_title(&transcript).as_deref())
+                    });
                 }
                 rect
             }

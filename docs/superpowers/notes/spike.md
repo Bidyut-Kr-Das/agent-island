@@ -77,3 +77,11 @@ Run from `D:\projects\agent-islands\spike\sandbox` in a Windows Terminal tab. Th
 - Q5: `UserPromptSubmit` has no `session_title`. The Windows Terminal tab title is a status glyph plus the session's AI title, e.g. `◐ AskUserQuestion probe with mkdir`. The AI title is in the transcript (`transcript_path`) as lines `{"type":"ai-title","aiTitle":"..."}`; the last such line is current. Go to terminal should read it from the transcript and match tab names that end with it.
 - Q8: `SelectionItemPattern.Select()` on a Windows Terminal TabItem switches tabs (confirmed by the user).
 - New fixtures: `PreToolUse-AskUserQuestion.json`, `PermissionRequest-AskUserQuestion.json`, `PermissionRequest-PowerShell.json`, `Notification-permission_prompt.json`.
+
+## Task 9 result
+Verified live (agent, 2026-11-15, without switching the user's tabs or windows):
+- `ai_title` on this session's real transcript returned `Claude Code dynamic island`.
+- `go_to_terminal(5868, Some("Claude Code dynamic island"))` (5868 = this session's `WindowsTerminal.exe`) returned true in about 45 ms; the matched tab was the already-selected one, and afterwards the same tab was still the only selected one.
+- `go_to_terminal` with a bogus pid returns false, with and without a hint (unit test).
+
+Left for the user (Task 10 checklist): two WT windows, several tabs, an `AskUserQuestion` waiting in a background tab of the non-front window; click "Go to terminal" and confirm the right window comes to the front (including from minimized) and the right tab is selected. Also confirm `SetForegroundWindow` is not refused when clicking the island (the `AttachThreadInput` fallback is untested live).
