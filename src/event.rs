@@ -12,6 +12,7 @@ pub struct HookEvent {
     pub tool_response: Value,
     pub notification_type: Option<String>,
     pub session_title: Option<String>,
+    pub mcp_server: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +38,7 @@ pub fn parse(raw: &Value) -> Option<HookEvent> {
         tool_response: raw.get("tool_response").cloned().unwrap_or(Value::Null),
         notification_type: text("notification_type"),
         session_title: text("session_title"),
+        mcp_server: text("mcp_server"),
     })
 }
 

@@ -57,7 +57,9 @@ pub struct Permission {
     pub req_id: u64,
     pub session_id: String,
     pub tool: String,
+    pub verb: String,
     pub detail: String,
+    pub full: String,
     pub timed_out: bool,
 }
 
@@ -166,11 +168,16 @@ impl State {
             "PermissionRequest" if ask => s.status = Status::Waiting(WaitKind::Question),
             "PermissionRequest" => {
                 self.next_req += 1;
+                let mcp = ev.mcp_server.as_deref();
+                let (verb, full) = crate::detail::full_line(tool, &ev.tool_input, mcp);
+                let (_, detail) = crate::detail::detail_line(tool, &ev.tool_input, mcp);
                 self.permissions.push_back(Permission {
                     req_id: self.next_req,
                     session_id: sid.to_owned(),
                     tool: tool.to_owned(),
-                    detail: tool.to_owned(), // Task 2 replaces this with detail_line
+                    verb,
+                    detail,
+                    full,
                     timed_out: false,
                 });
                 s.status = Status::Waiting(WaitKind::Permission);
@@ -349,6 +356,15 @@ mod tests {
         assert_eq!(s.permissions[0].req_id, id);
         assert_eq!(s.permissions[0].tool, "Bash");
         assert!(!s.permissions[0].timed_out);
+    }
+
+    #[test]
+    fn permission_request_fills_verb_detail_and_full() {
+        let raw = serde_json::from_str(include_str!("../tests/fixtures/PermissionRequest-PowerShell.json")).unwrap();
+        let mut s = State::default();
+        s.apply(&parse(&raw).unwrap(), Pids::default(), 1);
+        let p = &s.permissions[0];
+        assert_eq!((p.verb.as_str(), p.detail.as_str(), p.full.as_str()), ("Wants to run a command", "mkdir probe1", "mkdir probe1"));
     }
 
     #[test]
