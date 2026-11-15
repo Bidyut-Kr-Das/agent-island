@@ -1,7 +1,7 @@
 use crate::{hook::Reply, pipe::Server};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::time::Duration;
 
 pub enum Msg {
@@ -62,7 +62,13 @@ fn serve(f: std::fs::File, tx: &Sender<Msg>, wake: &impl Fn()) -> Option<()> {
             let d = if matches!(r, Reply::Allow) { "allow" } else { "deny" };
             (&f).write_all(format!("{{\"decision\":\"{d}\"}}\n").as_bytes()).ok()?;
         }
-        Err(_) => {
+        // The card was dropped (the turn ended): a gated command is denied, a permission request gets nothing.
+        Err(RecvTimeoutError::Disconnected) => {
+            if gated {
+                (&f).write_all(b"{\"decision\":\"deny\"}\n").ok()?;
+            }
+        }
+        Err(RecvTimeoutError::Timeout) => {
             // A gated hook must tell a timeout from a dead island; a permission request gets nothing.
             if gated {
                 (&f).write_all(b"{\"decision\":\"timeout\"}\n").ok()?;
@@ -105,6 +111,36 @@ mod tests {
         let mut line = String::new();
         BufReader::new(&c).read_line(&mut line).unwrap();
         assert_eq!(line, "{\"decision\":\"deny\"}\n");
+    }
+
+    fn read_all(c: std::fs::File) -> String {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut &c, &mut s);
+        s
+    }
+
+    #[test]
+    fn dropped_reply_denies_gated_at_once() {
+        let ev = serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": "PowerShell"});
+        let (msg, c) = send("gdrop", serde_json::json!({"event": ev, "chain": [], "gated": true}));
+        let Msg::Event { reply, .. } = msg else { panic!() };
+        let (rtx, qtx) = reply.unwrap();
+        qtx.send(1).unwrap();
+        let start = std::time::Instant::now();
+        drop(rtx);
+        assert_eq!(read_all(c), "{\"decision\":\"deny\"}\n");
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn dropped_reply_ends_permission_request_with_nothing() {
+        let ev = serde_json::json!({"hook_event_name": "PermissionRequest", "tool_name": "Bash"});
+        let (msg, c) = send("pdrop", serde_json::json!({"event": ev, "chain": []}));
+        let Msg::Event { reply, .. } = msg else { panic!() };
+        let (rtx, qtx) = reply.unwrap();
+        qtx.send(1).unwrap();
+        drop(rtx);
+        assert_eq!(read_all(c), "");
     }
 
     #[test]

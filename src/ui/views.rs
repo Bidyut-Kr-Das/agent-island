@@ -582,7 +582,7 @@ mod tests {
     fn perm(req_id: u64, sid: &str, timed_out: bool) -> crate::state::Permission {
         crate::state::Permission {
             req_id, session_id: sid.into(), tool: "Bash".into(), verb: "Wants to run a command".into(),
-            detail: "ls".into(), full: "ls".into(), timed_out,
+            detail: "ls".into(), full: "ls".into(), timed_out, gated: false,
         }
     }
 

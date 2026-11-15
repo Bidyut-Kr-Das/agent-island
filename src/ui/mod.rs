@@ -34,6 +34,9 @@ impl Core {
             Msg::Event { raw, chain, reply } => {
                 let Some(ev) = event::parse(&raw) else { return };
                 let id = self.state.apply(&ev, procs::find_pids(&chain), now);
+                // Dropping the Sender of a card the turn ended releases its waiting hook.
+                let perms = &self.state.permissions;
+                self.replies.retain(|id, _| perms.iter().any(|p| p.req_id == *id));
                 if let (Some(id), Some((reply, req))) = (id, reply) {
                     self.replies.insert(id, reply);
                     let _ = req.send(id);
@@ -418,6 +421,17 @@ mod tests {
             assert!(parse_click(Some(v)).is_none(), "{v:?} must not auto-click");
         }
         assert!(parse_click(None).is_none());
+    }
+
+    #[test]
+    fn stop_releases_waiting_hook() {
+        let mut c = Core::new();
+        let (rx, _) = event(&mut c, "PermissionRequest", "s", true).unwrap();
+        let (other, _) = event(&mut c, "PermissionRequest", "t", true).unwrap();
+        event(&mut c, "Stop", "s", false);
+        assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)));
+        assert!(matches!(other.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+        assert_eq!(c.replies.len(), 1);
     }
 
     #[test]

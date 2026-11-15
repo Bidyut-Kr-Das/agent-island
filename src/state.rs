@@ -61,6 +61,7 @@ pub struct Permission {
     pub detail: String,
     pub full: String,
     pub timed_out: bool,
+    pub gated: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -141,6 +142,13 @@ impl State {
                 self.sessions.len() - 1
             }
         };
+        match ev.name.as_str() {
+            // The turn is over: any blocking hook for this session is dead or moot.
+            "Stop" | "StopFailure" | "UserPromptSubmit" => self.permissions.retain(|p| p.session_id != sid),
+            // Any later event moves the session on (spec 6, "Leaving the waiting state").
+            "Notification" | "PermissionRequest" => {}
+            _ => self.permissions.retain(|p| p.session_id != sid || !p.timed_out),
+        }
         let has_card = self.permissions.iter().any(|p| p.session_id == sid);
         let has_pending = self.permissions.iter().any(|p| p.session_id == sid && !p.timed_out);
         let s = &mut self.sessions[idx];
@@ -185,6 +193,7 @@ impl State {
                     detail,
                     full,
                     timed_out: false,
+                    gated: ev.gated,
                 });
                 s.status = Status::Waiting(WaitKind::Permission);
                 req_id = Some(self.next_req);
@@ -235,9 +244,14 @@ impl State {
     }
 
     pub fn timeout(&mut self, req_id: u64) {
-        if let Some(p) = self.permissions.iter_mut().find(|p| p.req_id == req_id) {
+        if let Some(pos) = self.permissions.iter().position(|p| p.req_id == req_id) {
+            // A gated command was already denied by the hook: nothing waits in the terminal.
+            let p = &mut self.permissions[pos];
             p.timed_out = true;
             let sid = p.session_id.clone();
+            if p.gated {
+                self.permissions.remove(pos);
+            }
             self.settle(&sid);
         }
     }
@@ -409,6 +423,100 @@ mod tests {
         s.timeout(id);
         assert!(s.permissions[0].timed_out);
         assert_eq!(status(&s, "a"), Status::Waiting(WaitKind::Other));
+    }
+
+    #[test]
+    fn stop_with_pending_card_drops_it_and_goes_idle() {
+        for (name, fin) in [("Stop", Finish::Ok), ("StopFailure", Finish::Error)] {
+            let mut s = State::default();
+            let id = perm(&mut s, "a", "Bash");
+            perm(&mut s, "b", "Bash");
+            go(&mut s, name, "a", json!({}));
+            assert!(s.permissions.iter().all(|p| p.session_id == "b"), "{name}");
+            assert_eq!(status(&s, "a"), Status::Idle, "{name}");
+            assert_eq!(s.sessions[0].finished, Some(fin));
+            s.resolve(id);
+            assert_eq!(status(&s, "a"), Status::Idle, "resolve after {name} must not set Working");
+        }
+    }
+
+    #[test]
+    fn stop_drops_timed_out_card_and_goes_idle() {
+        let mut s = State::default();
+        let id = perm(&mut s, "a", "Bash");
+        s.timeout(id);
+        go(&mut s, "Stop", "a", json!({}));
+        assert!(s.permissions.is_empty());
+        assert_eq!(status(&s, "a"), Status::Idle);
+    }
+
+    #[test]
+    fn prompt_drops_all_cards_and_works() {
+        let mut s = State::default();
+        let id = perm(&mut s, "a", "Bash");
+        s.timeout(id);
+        perm(&mut s, "a", "Write");
+        go(&mut s, "UserPromptSubmit", "a", json!({}));
+        assert!(s.permissions.is_empty());
+        assert_eq!(status(&s, "a"), Status::Working);
+    }
+
+    #[test]
+    fn later_event_drops_timed_out_card_so_notification_counts() {
+        let mut s = State::default();
+        let id = perm(&mut s, "a", "Bash");
+        s.timeout(id);
+        go(&mut s, "Notification", "a", json!({"notification_type": "needs_input"}));
+        assert_eq!(s.permissions.len(), 1, "Notification keeps the timed-out card");
+        go(&mut s, "PostToolUse", "a", json!({"tool_name": "Bash"}));
+        assert!(s.permissions.is_empty());
+        assert_eq!(status(&s, "a"), Status::Working);
+        go(&mut s, "Notification", "a", json!({"notification_type": "needs_input"}));
+        assert_eq!(status(&s, "a"), Status::Waiting(WaitKind::Other));
+    }
+
+    #[test]
+    fn later_event_keeps_pending_card() {
+        let mut s = State::default();
+        let old = perm(&mut s, "a", "Bash");
+        s.timeout(old);
+        let new = perm(&mut s, "a", "Write");
+        go(&mut s, "PostToolUse", "a", json!({"tool_name": "Read"}));
+        let ids: Vec<_> = s.permissions.iter().map(|p| p.req_id).collect();
+        assert_eq!(ids, vec![new]);
+        assert_eq!(status(&s, "a"), Status::Waiting(WaitKind::Permission));
+    }
+
+    #[test]
+    fn answering_later_card_after_timeout_is_not_waiting() {
+        let mut s = State::default();
+        let old = perm(&mut s, "a", "Bash");
+        s.timeout(old);
+        go(&mut s, "PreToolUse", "a", json!({"tool_name": "Write"}));
+        let new = perm(&mut s, "a", "Write");
+        s.resolve(new);
+        assert!(s.permissions.is_empty());
+        assert_eq!(status(&s, "a"), Status::Working);
+    }
+
+    #[test]
+    fn gated_timeout_removes_card() {
+        let mut s = State::default();
+        let id = go(&mut s, "PreToolUse", "a", json!({"tool_name": "PowerShell", "tool_input": {"command": "git push"}, "gated": true})).unwrap();
+        s.timeout(id);
+        assert!(s.permissions.is_empty());
+        assert_eq!(status(&s, "a"), Status::Working);
+    }
+
+    #[test]
+    fn failure_and_denied_events_clear_non_permission_waiting() {
+        for name in ["StopFailure", "PostToolUseFailure", "PermissionDenied"] {
+            let mut s = State::default();
+            go(&mut s, "Notification", "a", json!({"notification_type": "needs_input"}));
+            assert_eq!(status(&s, "a"), Status::Waiting(WaitKind::Other));
+            go(&mut s, name, "a", json!({"tool_name": "Bash"}));
+            assert!(!matches!(status(&s, "a"), Status::Waiting(_)), "{name}");
+        }
     }
 
     #[test]
