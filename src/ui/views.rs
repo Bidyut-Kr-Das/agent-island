@@ -220,31 +220,34 @@ fn layout(p: &Painter, parts: &[(&str, TextFormat)], width: f32, rows: usize) ->
     p.layout_job(job)
 }
 
-/// 14 px green circle with a dark check (island-left.html .chk).
+/// Half the chevron width (4 px wide in all).
+const CHEV_HALF: f32 = 2.0;
+
 /// Right-pointing chevron, `size` px tall, drawn as two 1.5 px segments.
 fn chevron(p: &Painter, center: Pos2, size: f32, color: Color32) {
-    let (h, w) = (size / 2.0, size / 4.0);
+    let (h, w) = (size / 2.0, CHEV_HALF);
     let st = Stroke::new(1.5, color);
-    p.line_segment([center + vec2(-w / 2.0, -h), center + vec2(w / 2.0, 0.0)], st);
-    p.line_segment([center + vec2(w / 2.0, 0.0), center + vec2(-w / 2.0, h)], st);
+    p.line_segment([center + vec2(-w, -h), center + vec2(w, 0.0)], st);
+    p.line_segment([center + vec2(w, 0.0), center + vec2(-w, h)], st);
 }
 
 /// Title row x offsets from the row's left edge: parent (None when empty or too wide, dropped first),
 /// chevron center, and name. Layout: parent, 8 px, 4 px chevron, 8 px, name.
-pub struct TitleRow {
-    pub parent: Option<f32>,
-    pub chevron: f32,
-    pub name: f32,
+struct TitleRow {
+    parent: Option<f32>,
+    chevron: f32,
+    name: f32,
 }
 
-pub fn title_row(parent_w: f32, name_w: f32, avail: f32) -> TitleRow {
-    if parent_w > 0.0 && parent_w + 20.0 + name_w <= avail {
-        TitleRow { parent: Some(0.0), chevron: parent_w + 8.0 + 2.0, name: parent_w + 20.0 }
+fn title_row(parent_w: f32, name_w: f32, avail: f32) -> TitleRow {
+    if parent_w > 0.0 && parent_w + 16.0 + 2.0 * CHEV_HALF + name_w <= avail {
+        TitleRow { parent: Some(0.0), chevron: parent_w + 8.0 + CHEV_HALF, name: parent_w + 16.0 + 2.0 * CHEV_HALF }
     } else {
         TitleRow { parent: None, chevron: 0.0, name: 0.0 }
     }
 }
 
+/// 14 px green circle with a dark check (island-left.html .chk).
 fn check(p: &Painter, c: Pos2) {
     p.circle_filled(c, 7.0, OK);
     let pts = vec![c + vec2(-3.0, 0.2), c + vec2(-1.0, 2.2), c + vec2(3.0, -2.0)];
@@ -598,8 +601,8 @@ mod tests {
     fn title_chevron_sits_between_parent_and_name() {
         let r = title_row(40.0, 80.0, 200.0);
         assert_eq!(r.parent, Some(0.0));
-        assert!(r.chevron > 40.0 && r.chevron < r.name);
-        assert_eq!(r.name - (r.chevron + 2.0), 8.0);
+        assert_eq!((r.chevron - CHEV_HALF) - 40.0, 8.0);
+        assert_eq!(r.name - (r.chevron + CHEV_HALF), 8.0);
         assert!(title_row(0.0, 80.0, 200.0).parent.is_none());
         assert!(title_row(150.0, 80.0, 200.0).parent.is_none());
     }
