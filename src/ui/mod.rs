@@ -107,7 +107,7 @@ pub fn run() {
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
             let RawWindowHandle::Win32(h) = cc.window_handle()?.as_raw() else { return Err("not win32".into()) };
             let hwnd = HWND(h.hwnd.get() as *mut _);
-            win::sync_style(hwnd, true);
+            win::sync_style(hwnd);
             win::no_frame(hwnd);
             win::place(hwnd);
             theme::setup_fonts(&cc.egui_ctx);
@@ -115,7 +115,7 @@ pub fn run() {
             // Test hook: AGENT_ISLANDS_OPEN=<session id> opens the panel on that session once it exists.
             let open_req = std::env::var("AGENT_ISLANDS_OPEN").ok();
             let app = App {
-                core: Core::new(), rx, hwnd, trimmed: false, selected: None, open_req, was_down: false, arming: None, press_at: f64::NEG_INFINITY,
+                core: Core::new(), rx, hwnd, region: Vec::new(), trimmed: false, selected: None, open_req, was_down: false, arming: None, press_at: f64::NEG_INFINITY,
                 // Test hook, debug builds only: AGENT_ISLANDS_CLICK=allow|deny answers the first permission card 1 s after it shows.
                 #[cfg(debug_assertions)]
                 auto_click: parse_click(std::env::var("AGENT_ISLANDS_CLICK").ok().as_deref()),
@@ -129,6 +129,8 @@ struct App {
     core: Core,
     rx: Receiver<Msg>,
     hwnd: HWND,
+    /// Window region last set (see views::region).
+    region: Vec<[i32; 5]>,
     trimmed: bool,
     selected: Option<String>,
     open_req: Option<String>,
@@ -196,7 +198,7 @@ impl eframe::App for App {
         let cursor = win::cursor(self.hwnd, ctx.pixels_per_point());
         let (pressed, start) = ui.input(|i| (i.pointer.any_pressed(), i.pointer.press_start_time()));
         self.press_at = views::press_time(self.press_at, pressed, start, t);
-        let panel = match view {
+        let (panel, radius) = match view {
             View::Permission(id) => {
                 let shown = self.arming.filter(|a| a.req == id).is_some_and(|a| views::armed(a.appeared, t, a.entered));
                 let (rect, mut reply) = views::permission_card(ui, &self.core, id, shown, r, t);
@@ -218,7 +220,7 @@ impl eframe::App for App {
                 if let Some(reply) = reply {
                     self.core.answer(id, reply);
                 }
-                rect
+                (rect, 8.0)
             }
             View::Waiting(id) => {
                 let (rect, go) = views::waiting_card(ui, &self.core, &id, r, t);
@@ -230,31 +232,44 @@ impl eframe::App for App {
                         crate::focus::go_to_terminal(pid, crate::focus::ai_title(&transcript).as_deref())
                     });
                 }
-                rect
+                (rect, 8.0)
             }
             View::Panel | View::Pill => {
                 let panel = views::panel(ui, &self.core, &mut self.selected, r, t);
                 if panel.is_positive() {
-                    panel
+                    (panel, 8.0)
                 } else {
                     let (rect, open) = views::finished_pill(ui, &self.core, r);
                     if let Some(id) = open {
                         self.open_finished(id);
                     }
-                    rect
+                    (rect, rect.height() / 2.0)
                 }
             }
         };
-        // egui sees no hover while passthrough is on, so ask Windows where the cursor is.
+        // The window region is the drawn shapes: Windows sends clicks anywhere else to the window below.
+        // Hover tooltips (the full command on a permission card) float outside the card.
+        let mut shapes = vec![(panel, radius)];
+        ctx.memory(|m| {
+            let tips = m.areas().visible_layer_ids().into_iter().filter(|l| l.order == egui::Order::Tooltip);
+            shapes.extend(tips.filter_map(|l| m.area_rect(l.id).map(|r| (r, 4.0))));
+        });
+        let region = views::region(r, &shapes, ctx.pixels_per_point());
+        if region != self.region {
+            win::set_region(self.hwnd, &region);
+            self.region = region;
+        }
+        win::sync_style(self.hwnd);
         let over = cursor.is_some_and(|p| views::inside(p, r, panel));
-        win::sync_style(self.hwnd, !over);
         let down = win::left_down();
         if self.selected.is_some() && views::outside_click(self.was_down, down, over) {
             self.selected = None;
         }
         self.was_down = down;
         let moving = panel.is_positive() || self.core.state.sessions.iter().any(|s| matches!(s.status, crate::state::Status::Working | crate::state::Status::Waiting(_)));
-        ctx.request_repaint_after(Duration::from_millis(if moving { 33 } else { 100 }));
+        // Nothing moving: input and pipe messages wake the UI; one frame per prune interval keeps
+        // pruning and the exit-when-empty timer going.
+        ctx.request_repaint_after(if moving { Duration::from_millis(33) } else { PRUNE_EVERY });
     }
 }
 
@@ -306,29 +321,51 @@ mod win {
         Some(Pos2::new((p.x - r.left) as f32 / ppp, (p.y - r.top) as f32 / ppp))
     }
 
-    /// Never activate, no taskbar or Alt+Tab entry, always layered; only TRANSPARENT (click-through) toggles.
+    /// Never activate, no taskbar or Alt+Tab entry. Never click-through: the window region decides where
+    /// clicks land. Not layered: winit's DWM transparency already blends per pixel.
     /// winit rewrites GWL_EXSTYLE whenever its own flags change (e.g. on first show), so sync_style
-    /// runs every frame and owns passthrough instead of ViewportCommand::MousePassthrough.
-    pub fn ex_style(cur: isize, passthrough: bool) -> isize {
-        let t = WS_EX_TRANSPARENT.0 as isize;
-        let want = (cur | (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED).0 as isize) & !(WS_EX_APPWINDOW.0 as isize);
-        if passthrough { want | t } else { want & !t }
+    /// runs every frame.
+    pub fn ex_style(cur: isize) -> isize {
+        (cur | (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW).0 as isize) & !((WS_EX_APPWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT).0 as isize)
     }
 
-    pub fn sync_style(hwnd: HWND, passthrough: bool) {
+    /// A plain popup. winit keeps WS_CAPTION and friends on undecorated windows, so DWM drew a drop
+    /// shadow around the whole window rect, a caption edge and a close button ("x") over the screen.
+    pub fn style(cur: isize) -> isize {
+        let frame = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+        (cur | WS_POPUP.0 as isize) & !(frame.0 as isize)
+    }
+
+    pub fn sync_style(hwnd: HWND) {
         unsafe {
-            let cur = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            let want = ex_style(cur, passthrough);
-            if want == cur {
-                return;
+            let mut changed = false;
+            for (index, want) in [(GWL_EXSTYLE, ex_style as fn(isize) -> isize), (GWL_STYLE, style)] {
+                let cur = GetWindowLongPtrW(hwnd, index);
+                if want(cur) != cur {
+                    SetWindowLongPtrW(hwnd, index, want(cur));
+                    changed = true;
+                }
             }
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
-            if cur & WS_EX_LAYERED.0 as isize == 0 {
-                // Only when LAYERED is (re)applied: winit drops it whenever it rewrites the style (e.g. first show).
-                // Without LWA_ALPHA a layered GL window composites see-through.
-                let _ = SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 255, LWA_ALPHA);
+            if changed {
                 let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             }
+        }
+    }
+
+    /// Clips the window to the union of `shapes` (views::region); outside it the window neither draws nor
+    /// takes clicks.
+    pub fn set_region(hwnd: HWND, shapes: &[[i32; 5]]) {
+        use windows::Win32::Graphics::Gdi::{CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, RGN_OR, SetWindowRgn};
+        unsafe {
+            let rgn = CreateRectRgn(0, 0, 0, 0);
+            for &[l, t, r, b, d] in shapes {
+                // The right and bottom edges of a round-rect region are exclusive.
+                let part = CreateRoundRectRgn(l, t, r + 1, b + 1, d, d);
+                CombineRgn(Some(rgn), Some(rgn), Some(part), RGN_OR);
+                let _ = DeleteObject(part.into());
+            }
+            // The system owns the region from here on.
+            SetWindowRgn(hwnd, Some(rgn), true);
         }
     }
 }
@@ -393,17 +430,19 @@ mod tests {
     }
 
     #[test]
-    fn ex_style_keeps_layered_and_toggles_only_transparent() {
+    fn ex_style_never_activates_and_is_not_layered_or_click_through() {
         use windows::Win32::UI::WindowsAndMessaging::*;
         let has = |s: isize, f: WINDOW_EX_STYLE| s & f.0 as isize != 0;
-        let start = (WS_EX_APPWINDOW | WS_EX_TOPMOST).0 as isize;
-        for through in [true, false] {
-            let s = win::ex_style(start, through);
-            assert!(has(s, WS_EX_LAYERED), "layered stays on (through={through})");
-            assert!(has(s, WS_EX_NOACTIVATE) && has(s, WS_EX_TOOLWINDOW) && has(s, WS_EX_TOPMOST));
-            assert!(!has(s, WS_EX_APPWINDOW));
-            assert_eq!(has(s, WS_EX_TRANSPARENT), through);
-        }
+        let s = win::ex_style((WS_EX_APPWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT).0 as isize);
+        assert!(has(s, WS_EX_NOACTIVATE) && has(s, WS_EX_TOOLWINDOW) && has(s, WS_EX_TOPMOST));
+        assert!(!has(s, WS_EX_APPWINDOW) && !has(s, WS_EX_LAYERED) && !has(s, WS_EX_TRANSPARENT));
+    }
+
+    #[test]
+    fn style_has_no_frame_or_caption() {
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        let s = win::style((WS_VISIBLE | WS_CLIPSIBLINGS | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX).0 as isize);
+        assert_eq!(s, (WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS).0 as isize);
     }
 
     #[test]

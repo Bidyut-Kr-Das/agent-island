@@ -197,6 +197,15 @@ pub fn inside(p: Pos2, pill: Rect, panel: Rect) -> bool {
     hit(p, pill) || panel.contains(p)
 }
 
+/// Window region in physical px: `[left, top, right, bottom, corner diameter]` for the pill and each
+/// shown shape beside it as (rect, corner radius), skipping empty ones.
+pub fn region(pill: Rect, others: &[(Rect, f32)], ppp: f32) -> Vec<[i32; 5]> {
+    let px = |v: f32| (v * ppp).round() as i32;
+    let pill = (pill.height() >= 1.0).then_some((pill, pill.width() / 2.0));
+    let others = others.iter().copied().filter(|(r, _)| r.is_positive());
+    pill.into_iter().chain(others).map(|(r, rad)| [px(r.left()), px(r.top()), px(r.right()), px(r.bottom()), px(2.0 * rad)]).collect()
+}
+
 /// Index of the blob whose 22 px box contains `p.y`.
 pub fn blob_at(p: Pos2, pill: Rect, n: usize) -> Option<usize> {
     let rel = p.y - pill.top() - 1.0 - PAD_Y;
@@ -495,6 +504,31 @@ mod tests {
         let r = panel_rect(pill, 200.0);
         assert_eq!(r, Rect::from_min_size(pos2(50.0, 8.0), vec2(300.0, 200.0)));
         assert_eq!(panel_rect(pill, 900.0).bottom(), 520.0 - MARGIN, "fits the window");
+    }
+
+    #[test]
+    fn region_pill_only_is_one_capsule_in_pixels() {
+        let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 100.0));
+        assert_eq!(region(pill, &[(Rect::NOTHING, 8.0)], 1.25), vec![[10, 10, 53, 135, 43]]);
+        assert_eq!(region(Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 0.0)), &[], 1.0), Vec::<[i32; 5]>::new(), "no sessions: empty");
+    }
+
+    #[test]
+    fn region_pill_and_panel() {
+        let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 100.0));
+        let panel = panel_rect(pill, 200.0);
+        assert_eq!(region(pill, &[(panel, 8.0)], 1.0), vec![[8, 8, 42, 108, 34], [50, 8, 350, 208, 16]]);
+    }
+
+    #[test]
+    fn region_pill_card_and_label() {
+        let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 100.0));
+        let card = card_rect(pill, 0, 150.0);
+        let label = label_rect(pill, 1, vec2(120.0, 30.0));
+        let r = region(pill, &[(card, 8.0), (label, 15.0)], 2.0);
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[1], [100, 38, 660, 338, 32]);
+        assert_eq!(r[2], [100, 86, 340, 146, 60], "capsule label");
     }
 
     #[test]
