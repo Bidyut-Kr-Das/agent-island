@@ -1,0 +1,7 @@
+{
+  "name": "agent-islands-local",
+  "owner": { "name": "local" },
+  "plugins": [
+    { "name": "agent-islands", "source": "./plugin", "description": "Dynamic-island overlay for Claude Code sessions" }
+  ]
+}
