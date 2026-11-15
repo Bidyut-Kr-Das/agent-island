@@ -82,7 +82,6 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
     let inner = PANEL_W - 2.0 - 32.0;
     let text = |s: &str, size: f32, family: &str, color: Color32, width: f32| layout(ui.painter(), &[(s, fmt(size, family, color))], width, 2);
     let title = text(&s.project, 14.0, "geist-semibold", FG, inner - 30.0);
-    let path = text(&s.cwd, 11.0, "geist-mono", FG3, inner);
     let rows: Vec<_> = panel_rows(s)
         .into_iter()
         .map(|(icon, label)| {
@@ -95,7 +94,7 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
         })
         .collect();
     let heights: Vec<f32> = rows.iter().map(|(_, g)| g.size().y.max(14.0) + 8.0).collect();
-    let head = 2.0 + 28.0 + title.size().y + 2.0 + path.size().y + if rows.is_empty() { 0.0 } else { 10.0 };
+    let head = 2.0 + 28.0 + title.size().y + if rows.is_empty() { 0.0 } else { 10.0 };
     let first = first_row(&heights, WIN_H - MARGIN - pill.top() - head);
     let full = panel_rect(pill, head + heights[first..].iter().sum::<f32>());
 
@@ -108,9 +107,7 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
     let x = full.left() + 17.0;
     let mut y = full.top() + 15.0;
     p.galley(pos2(x, y), title.clone(), FG);
-    y += title.size().y + 2.0;
-    p.galley(pos2(x, y), path.clone(), FG3);
-    y += path.size().y + 10.0;
+    y += title.size().y + 10.0;
     for ((icon, g), h) in rows.into_iter().zip(heights).skip(first) {
         let c = pos2(x + 7.0, y + h / 2.0);
         match icon {

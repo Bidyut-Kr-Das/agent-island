@@ -78,9 +78,11 @@ pub struct State {
     next_req: u64,
 }
 
-fn project_name(cwd: &str) -> String {
-    let parts = [char::from(92), '/'];
-    cwd.trim_end_matches(parts).rsplit(parts).next().unwrap_or_default().to_owned()
+/// Session label: the last two folders of the repo root above `cwd` (or of `cwd` itself), joined with " > ".
+pub fn display_name(cwd: &str) -> String {
+    let root = std::path::Path::new(cwd).ancestors().find(|a| a.join(".git").exists()).map_or(cwd, |a| a.to_str().unwrap_or(cwd));
+    let parts: Vec<&str> = root.split([char::from(92), '/']).filter(|p| !p.is_empty()).collect();
+    parts[parts.len().saturating_sub(2)..].join(" > ")
 }
 
 /// A random color index in 0..6, preferring ones not in `used`.
@@ -141,7 +143,7 @@ impl State {
                 let color = pick_color(&used, RandomState::new().hash_one(sid));
                 self.sessions.push(Session {
                     id: sid.to_owned(),
-                    project: project_name(&ev.cwd),
+                    project: display_name(&ev.cwd),
                     cwd: ev.cwd.clone(),
                     transcript: ev.transcript_path.clone(),
                     color,
@@ -166,6 +168,10 @@ impl State {
         let has_pending = self.permissions.iter().any(|p| p.session_id == sid && !p.timed_out);
         let s = &mut self.sessions[idx];
         s.changed_at = now;
+        if !ev.cwd.is_empty() && ev.cwd != s.cwd {
+            s.cwd = ev.cwd.clone();
+            s.project = display_name(&ev.cwd);
+        }
         s.claude_pid = pids.claude.or(s.claude_pid);
         s.terminal_pid = pids.terminal.or(s.terminal_pid);
         let tool = ev.tool_name.as_deref().unwrap_or_default();
@@ -318,18 +324,62 @@ mod tests {
         let mut s = State::default();
         go(&mut s, "SessionStart", "a", json!({}));
         assert_eq!(s.sessions.len(), 1);
-        assert_eq!(s.sessions[0].project, "payments-api");
+        assert_eq!(s.sessions[0].project, "projects > payments-api");
         assert_eq!(s.sessions[0].status, Status::Idle);
         assert_eq!(s.sessions[0].transcript, "t.jsonl");
     }
 
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ai-dn-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
     #[test]
-    fn project_name_tolerates_trailing_separator_and_forward_slashes() {
-        let mut s = State::default();
-        go(&mut s, "SessionStart", "a", json!({"cwd": r"D:\projects\x-app\"}));
-        go(&mut s, "SessionStart", "b", json!({"cwd": "/home/me/y-app"}));
-        assert_eq!(s.sessions[0].project, "x-app");
-        assert_eq!(s.sessions[1].project, "y-app");
+    fn display_name_uses_repo_root() {
+        let t = tmp("root");
+        let app = t.join("ws/repo/app/src");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir(t.join("ws/repo/.git")).unwrap();
+        assert_eq!(display_name(app.to_str().unwrap()), "ws > repo");
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    #[test]
+    fn display_name_git_file_counts() {
+        let t = tmp("file");
+        let app = t.join("ws/wt/src");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(t.join("ws/wt/.git"), "gitdir: x").unwrap();
+        assert_eq!(display_name(app.to_str().unwrap()), "ws > wt");
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    #[test]
+    fn display_name_no_repo_uses_cwd() {
+        let t = tmp("none");
+        let c = t.join("a/b/c");
+        std::fs::create_dir_all(&c).unwrap();
+        assert_eq!(display_name(c.to_str().unwrap()), "b > c");
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    #[test]
+    fn display_name_missing_path() {
+        assert_eq!(display_name(r"Z:\nope\gone\deep"), "gone > deep");
+    }
+
+    #[test]
+    fn display_name_root_and_single() {
+        assert_eq!(display_name(r"D:\"), "D:");
+        assert_eq!(display_name("/home"), "home");
+        assert_eq!(display_name(""), "");
+    }
+
+    #[test]
+    fn display_name_trailing_and_forward_slashes() {
+        assert_eq!(display_name(r"D:\projects\x-app\"), "projects > x-app");
+        assert_eq!(display_name("/home/me/y-app"), "me > y-app");
     }
 
     #[test]
@@ -706,12 +756,15 @@ mod tests {
     }
 
     #[test]
-    fn cwd_pinned_from_first_event() {
+    fn name_follows_cwd() {
         let mut s = State::default();
         go(&mut s, "SessionStart", "a", json!({}));
-        go(&mut s, "PreToolUse", "a", json!({"cwd": r"D:\elsewhere", "tool_name": "Bash"}));
-        assert_eq!(s.sessions[0].cwd, CWD);
-        assert_eq!(s.sessions[0].project, "payments-api");
+        go(&mut s, "PreToolUse", "a", json!({"cwd": r"D:\elsewhere\proj", "tool_name": "Bash"}));
+        assert_eq!(s.sessions[0].cwd, r"D:\elsewhere\proj");
+        assert_eq!(s.sessions[0].project, "elsewhere > proj");
+        go(&mut s, "PreToolUse", "a", json!({"cwd": "", "tool_name": "Bash"}));
+        assert_eq!(s.sessions[0].cwd, r"D:\elsewhere\proj");
+        assert_eq!(s.sessions[0].project, "elsewhere > proj");
     }
 
     #[test]
