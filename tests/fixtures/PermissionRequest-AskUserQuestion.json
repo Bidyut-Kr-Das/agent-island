@@ -1,0 +1,32 @@
+{
+  "session_id": "a0a18f2c-9293-45bf-a2e2-4e7f3eb14f4a",
+  "transcript_path": "C:\\Users\\Bidyut Kr. Das\\.claude\\projects\\D--projects-agent-islands-spike-sandbox\\a0a18f2c-9293-45bf-a2e2-4e7f3eb14f4a.jsonl",
+  "cwd": "D:\\projects\\agent-islands\\spike\\sandbox",
+  "scratchpad_dir": "C:\\Users\\BIDYUT~1.DAS\\AppData\\Local\\Temp\\claude\\c86672709cc43121\\a0a18f2c-9293-45bf-a2e2-4e7f3eb14f4a\\scratchpad",
+  "prompt_id": "52748dd9-278f-4caa-83e3-2817c5b7b8ad",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Pick option for probe test: X or Y?",
+        "header": "Probe",
+        "options": [
+          {
+            "label": "X",
+            "description": "Option X"
+          },
+          {
+            "label": "Y",
+            "description": "Option Y"
+          }
+        ],
+        "multiSelect": false
+      }
+    ]
+  }
+}

@@ -67,3 +67,13 @@ Run from `D:\projects\agent-islands\spike\sandbox` in a Windows Terminal tab. Th
 4. Q8 select: with 2+ WT tabs open, run in PowerShell:
    `Add-Type -AssemblyName UIAutomationClient; $r=[Windows.Automation.AutomationElement]::RootElement; $t=$r.FindAll('Descendants',(New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::TabItem))); $t[0].GetCurrentPattern([Windows.Automation.SelectionItemPattern]::Pattern).Select()`
    Confirm the first tab becomes active.
+
+## Manual check results (user, 2026-11-15, interactive session)
+
+- Q2: the only `notification_type` seen is `permission_prompt` (message "Claude needs your permission"), fired right after each `PermissionRequest`. No idle notification appeared within the wait.
+- AskUserQuestion fires `PreToolUse` AND `PermissionRequest` (tool_name `AskUserQuestion`) AND `Notification` `permission_prompt`. The island must treat a `PermissionRequest` for `AskUserQuestion` as a question: show "Has a question for you", and the hook must print nothing and exit immediately so the terminal shows the question.
+- The shell tool on this machine is `PowerShell` (tool_name `PowerShell`, tool_input `{command, description}`), not `Bash`. The detail line must treat `PowerShell` like `Bash`. Check 2 with the `Bash`-matcher deny plugin therefore never fired; deny output itself was already confirmed headless.
+- Q3: after Esc mid-stream, a `Stop` event fired. Interrupts do produce `Stop`.
+- Q5: `UserPromptSubmit` has no `session_title`. The Windows Terminal tab title is a status glyph plus the session's AI title, e.g. `◐ AskUserQuestion probe with mkdir`. The AI title is in the transcript (`transcript_path`) as lines `{"type":"ai-title","aiTitle":"..."}`; the last such line is current. Go to terminal should read it from the transcript and match tab names that end with it.
+- Q8: `SelectionItemPattern.Select()` on a Windows Terminal TabItem switches tabs (confirmed by the user).
+- New fixtures: `PreToolUse-AskUserQuestion.json`, `PermissionRequest-AskUserQuestion.json`, `PermissionRequest-PowerShell.json`, `Notification-permission_prompt.json`.
