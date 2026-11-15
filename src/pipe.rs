@@ -17,6 +17,10 @@ const ERROR_FILE_NOT_FOUND: i32 = 2;
 const ERROR_PIPE_BUSY: i32 = 231;
 
 pub fn pipe_name() -> String {
+    // Test-only override so tests never touch a real island.
+    if let Ok(n) = std::env::var("AGENT_ISLANDS_PIPE") {
+        return n;
+    }
     format!(r"\\.\pipe\agent-islands-{}", std::env::var("USERNAME").unwrap_or_default())
 }
 
@@ -90,6 +94,7 @@ impl Server {
     }
 }
 
+#[allow(dead_code)]
 pub fn connect() -> io::Result<(File, u32)> {
     connect_to(&pipe_name())
 }
