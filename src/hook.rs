@@ -65,12 +65,13 @@ fn spawn_island() {
     }
 }
 
-fn connect_retry(name: &str, spawn: bool) -> Option<(std::fs::File, u32)> {
+/// The pipe, the server pid, and whether this call started the island.
+fn connect_retry(name: &str, spawn: bool) -> Option<(std::fs::File, u32, bool)> {
     let mut spawned = false;
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         match pipe::connect_to(name) {
-            Ok(c) => return Some(c),
+            Ok((f, pid)) => return Some((f, pid, spawned)),
             Err(e) if pipe::is_not_found(&e) && spawn && Instant::now() < deadline => {
                 if !spawned {
                     spawn_island();
@@ -98,10 +99,12 @@ fn read_reply(f: std::fs::File) -> Option<Reply> {
     }
 }
 
-/// Only events that create or locate a session's processes need the (slow) process chain.
-fn needs_chain(event: &Value) -> bool {
-    match event["hook_event_name"].as_str() {
-        Some("SessionStart" | "UserPromptSubmit" | "PermissionRequest" | "Notification") => true,
+/// Only events that create or locate a session's processes need the (slow) process chain, plus every
+/// event that started the island (it knows no pids yet). Stop ends every turn, so any session seen
+/// mid-session gets its pids within one turn.
+fn needs_chain(event: &Value, spawned: bool) -> bool {
+    spawned || match event["hook_event_name"].as_str() {
+        Some("SessionStart" | "UserPromptSubmit" | "PermissionRequest" | "Notification" | "Stop" | "StopFailure") => true,
         Some("PreToolUse") => event["tool_name"] == "AskUserQuestion",
         _ => false,
     }
@@ -110,7 +113,7 @@ fn needs_chain(event: &Value) -> bool {
 /// Forwards the hook event; returns the stdout text to print, if any.
 fn run_with(name: &str, spawn: bool, input: &str) -> Option<String> {
     let event: Value = serde_json::from_str(input).ok()?;
-    let (mut f, server_pid) = connect_retry(name, spawn)?;
+    let (mut f, server_pid, spawned) = connect_retry(name, spawn)?;
     let verified = match (procs::exe_path(server_pid), std::env::current_exe()) {
         (Some(a), Ok(b)) => same_exe(&a, &b),
         _ => false,
@@ -120,7 +123,7 @@ fn run_with(name: &str, spawn: bool, input: &str) -> Option<String> {
     }
     let wants_reply = event["hook_event_name"] == "PermissionRequest"
         && event["tool_name"] != "AskUserQuestion";
-    let chain = if needs_chain(&event) { procs::ancestors(std::process::id()) } else { Vec::new() };
+    let chain = if needs_chain(&event, spawned) { procs::ancestors(std::process::id()) } else { Vec::new() };
     let mut line = json!({"event": event, "chain": chain}).to_string();
     line.push('\n');
     f.write_all(line.as_bytes()).ok()?;
@@ -176,13 +179,18 @@ mod tests {
     #[test]
     fn chain_only_for_events_that_find_processes() {
         let ev = |name: &str, tool: &str| json!({"hook_event_name": name, "tool_name": tool});
-        for name in ["SessionStart", "UserPromptSubmit", "PermissionRequest", "Notification"] {
-            assert!(needs_chain(&ev(name, "Bash")), "{name}");
+        for name in ["SessionStart", "UserPromptSubmit", "PermissionRequest", "Notification", "Stop", "StopFailure"] {
+            assert!(needs_chain(&ev(name, "Bash"), false), "{name}");
         }
-        assert!(needs_chain(&ev("PreToolUse", "AskUserQuestion")));
-        for name in ["PreToolUse", "PostToolUse", "Stop", "SessionEnd", "TaskCompleted"] {
-            assert!(!needs_chain(&ev(name, "Bash")), "{name}");
+        assert!(needs_chain(&ev("PreToolUse", "AskUserQuestion"), false));
+        for name in ["PreToolUse", "PostToolUse", "SessionEnd", "TaskCompleted"] {
+            assert!(!needs_chain(&ev(name, "Bash"), false), "{name}");
         }
+    }
+
+    #[test]
+    fn freshly_spawned_island_always_gets_the_chain() {
+        assert!(needs_chain(&json!({"hook_event_name": "PostToolUse", "tool_name": "Bash"}), true));
     }
 
     #[test]

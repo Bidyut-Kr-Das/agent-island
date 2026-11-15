@@ -107,6 +107,9 @@ fn apply_todo(todos: &mut Vec<Todo>, change: TodoChange) {
     }
 }
 
+/// A pid-less session silent this long (ms) is treated as gone.
+const STALE_MS: u64 = 30 * 60 * 1000;
+
 impl State {
     pub fn apply(&mut self, ev: &HookEvent, pids: Pids, now: u64) -> Option<u64> {
         let sid = ev.session_id.as_str();
@@ -242,8 +245,13 @@ impl State {
         }
     }
 
-    pub fn prune(&mut self, alive: impl Fn(u32) -> bool) {
-        self.sessions.retain(|s| s.claude_pid.is_none_or(&alive));
+    /// Drops sessions whose claude process is gone, and sessions with no known claude pid that have been
+    /// silent for STALE_MS and are not waiting on the user (`now` in ms, like `changed_at`).
+    pub fn prune(&mut self, alive: impl Fn(u32) -> bool, now: u64) {
+        self.sessions.retain(|s| match s.claude_pid {
+            Some(pid) => alive(pid),
+            None => matches!(s.status, Status::Waiting(_)) || now.saturating_sub(s.changed_at) < STALE_MS,
+        });
         let sessions = &self.sessions;
         self.permissions.retain(|p| sessions.iter().any(|s| s.id == p.session_id));
     }
@@ -553,10 +561,22 @@ mod tests {
         s.apply(&ev("SessionStart", "b", json!({})), Pids { claude: Some(2), terminal: None }, 1);
         go(&mut s, "SessionStart", "c", json!({}));
         perm(&mut s, "a", "Bash");
-        s.prune(|pid| pid == 2);
+        s.prune(|pid| pid == 2, 1);
         let ids: Vec<_> = s.sessions.iter().map(|x| x.id.as_str()).collect();
         assert_eq!(ids, vec!["b", "c"]);
         assert!(s.permissions.is_empty());
+    }
+
+    #[test]
+    fn prune_drops_stale_pidless_sessions_unless_waiting() {
+        let mut s = State::default();
+        go(&mut s, "SessionStart", "stale", json!({}));
+        perm(&mut s, "waiting", "Bash");
+        let now = 1 + 30 * 60 * 1000;
+        s.apply(&ev("PostToolUse", "fresh", json!({})), Pids::default(), now - 1000);
+        s.prune(|_| true, now);
+        let ids: Vec<_> = s.sessions.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids, vec!["waiting", "fresh"]);
     }
 
     #[test]

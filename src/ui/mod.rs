@@ -53,11 +53,11 @@ impl Core {
         self.state.resolve(req_id);
     }
 
-    /// True when the process should exit.
-    pub fn tick(&mut self, now: Instant) -> bool {
+    /// True when the process should exit. `now_ms` is wall-clock ms, as passed to `handle`.
+    pub fn tick(&mut self, now: Instant, now_ms: u64) -> bool {
         if self.last_prune.is_none_or(|t| now.duration_since(t) >= PRUNE_EVERY) {
             self.last_prune = Some(now);
-            self.state.prune(procs::is_alive);
+            self.state.prune(procs::is_alive, now_ms);
         }
         if !self.state.is_empty() {
             self.empty_since = None;
@@ -162,7 +162,7 @@ impl eframe::App for App {
             self.core.handle(msg, now_ms);
         }
         let ctx = ui.ctx().clone();
-        if self.core.tick(Instant::now()) {
+        if self.core.tick(Instant::now(), now_ms) {
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
         }
@@ -449,9 +449,9 @@ mod tests {
     fn tick_exits_after_3s_empty_not_before() {
         let mut c = Core::new();
         let t = Instant::now();
-        assert!(!c.tick(t));
-        assert!(!c.tick(t + Duration::from_millis(2900)));
-        assert!(c.tick(t + Duration::from_secs(3)));
+        assert!(!c.tick(t, 0));
+        assert!(!c.tick(t + Duration::from_millis(2900), 0));
+        assert!(c.tick(t + Duration::from_secs(3), 0));
     }
 
     #[test]
@@ -459,7 +459,7 @@ mod tests {
         let mut c = Core::new();
         event(&mut c, "SessionStart", "s", false);
         let t = Instant::now();
-        assert!(!c.tick(t));
-        assert!(!c.tick(t + Duration::from_secs(10)));
+        assert!(!c.tick(t, 0));
+        assert!(!c.tick(t + Duration::from_secs(10), 0));
     }
 }
