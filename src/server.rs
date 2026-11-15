@@ -13,6 +13,8 @@ pub enum Msg {
         reply: Option<(Sender<Reply>, Sender<u64>)>,
     },
     Timeout(u64),
+    /// Todos rebuilt from a session's transcript by a worker thread.
+    Replay { session_id: String, todos: Vec<crate::state::Todo> },
 }
 
 /// Fails if another island already owns the pipe.

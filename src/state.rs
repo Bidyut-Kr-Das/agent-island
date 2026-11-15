@@ -93,7 +93,7 @@ fn pick_color(used: &[usize], seed: u64) -> usize {
     candidates[seed as usize % candidates.len()]
 }
 
-fn apply_todo(todos: &mut Vec<Todo>, change: TodoChange) {
+pub(crate) fn apply_todo(todos: &mut Vec<Todo>, change: TodoChange) {
     match change {
         TodoChange::Replace(list) => *todos = list,
         TodoChange::Upsert(t) => match todos.iter_mut().find(|x| x.id == t.id) {
@@ -268,6 +268,12 @@ impl State {
                 self.permissions.remove(pos);
             }
             self.settle(&sid);
+        }
+    }
+
+    pub fn set_todos(&mut self, session_id: &str, todos: Vec<Todo>) {
+        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+            s.todos = todos;
         }
     }
 
@@ -688,6 +694,16 @@ mod tests {
 
     fn todo(id: &str, status: TodoStatus) -> Todo {
         Todo { id: id.into(), subject: id.into(), status }
+    }
+
+    #[test]
+    fn set_todos_replaces_for_known_session_only() {
+        let mut s = State::default();
+        go(&mut s, "SessionStart", "a", json!({}));
+        s.set_todos("a", vec![todo("A", TodoStatus::Pending)]);
+        s.set_todos("zzz", vec![todo("B", TodoStatus::Pending)]);
+        assert_eq!(s.sessions.len(), 1);
+        assert_eq!(s.sessions[0].todos, vec![todo("A", TodoStatus::Pending)]);
     }
 
     #[test]

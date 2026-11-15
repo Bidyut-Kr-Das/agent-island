@@ -1,0 +1,11 @@
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"TaskCreate","input":{"subject":"A","description":"a"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1"}]},"toolUseResult":{"task":{"id":"1","subject":"A"}}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_2","name":"TaskCreate","input":{"subject":"B","description":"b"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_2"}]},"toolUseResult":{"task":{"id":"2","subject":"B"}}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_3","name":"TaskUpdate","input":{"taskId":"1","status":"in_progress"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_3"}]},"toolUseResult":{"success":true}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_4","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_4"}]},"toolUseResult":{"success":true}}
+{"type":"api-request-shape","tools":[{"name":"TaskCreate","input_schema":{}}]}
+not json
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_5","name":"TaskCreate","input":{"subject":"Cut off"}}]}}

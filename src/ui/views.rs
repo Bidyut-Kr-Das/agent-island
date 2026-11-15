@@ -749,7 +749,7 @@ mod tests {
 
     #[test]
     fn permission_beats_waiting_beats_panel() {
-        let mut c = Core::new();
+        let mut c = Core::new(std::sync::mpsc::channel().0);
         c.state.sessions = vec![sess("a", 1), sess("b", 2)];
         assert_eq!(current_view(&c, false), View::Pill);
         assert_eq!(current_view(&c, true), View::Panel);
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn timed_out_permission_shows_waiting() {
-        let mut c = Core::new();
+        let mut c = Core::new(std::sync::mpsc::channel().0);
         c.state.sessions = vec![sess("a", 1)];
         c.state.sessions[0].status = Status::Waiting(WaitKind::Other);
         c.state.permissions.push_back(perm(3, "a", true));

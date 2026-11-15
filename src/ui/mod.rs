@@ -20,20 +20,34 @@ pub struct Core {
     pub replies: HashMap<u64, Sender<Reply>>,
     empty_since: Option<Instant>,
     last_prune: Option<Instant>,
+    tx: Sender<Msg>,
 }
 
 const PRUNE_EVERY: Duration = Duration::from_secs(3);
 const EXIT_AFTER_EMPTY: Duration = Duration::from_secs(3);
 
 impl Core {
-    pub fn new() -> Core {
-        Core { state: State::default(), replies: HashMap::new(), empty_since: None, last_prune: None }
+    pub fn new(tx: Sender<Msg>) -> Core {
+        Core { state: State::default(), replies: HashMap::new(), empty_since: None, last_prune: None, tx }
     }
 
     pub fn handle(&mut self, msg: Msg, now: u64) {
         match msg {
             Msg::Event { raw, chain, reply } => {
                 let Some(ev) = event::parse(&raw) else { return };
+                let known = self.state.sessions.iter().any(|s| s.id == ev.session_id);
+                if !known && !ev.transcript_path.is_empty() {
+                    // Rebuild todos on the worker thread; transcripts can be tens of MB.
+                    // ponytail: the UI sees the result on its next frame, up to 3 s when idle; no wake here.
+                    // ponytail: a replay landing after live todo events overwrites them with the transcript's
+                    // state, which already contains them, unless the transcript write lags the hook.
+                    let (tx, path, session_id) = (self.tx.clone(), ev.transcript_path.clone(), ev.session_id.clone());
+                    std::thread::spawn(move || {
+                        if let Ok(text) = std::fs::read_to_string(path) {
+                            let _ = tx.send(Msg::Replay { session_id, todos: event::replay(&text) });
+                        }
+                    });
+                }
                 let id = self.state.apply(&ev, procs::find_pids(&chain), now);
                 // Dropping the Sender of a card the turn ended releases its waiting hook.
                 let perms = &self.state.permissions;
@@ -47,6 +61,7 @@ impl Core {
                 self.replies.remove(&id);
                 self.state.timeout(id);
             }
+            Msg::Replay { session_id, todos } => self.state.set_todos(&session_id, todos),
         }
     }
 
@@ -91,7 +106,7 @@ pub fn run() {
             c.request_repaint();
         }
     };
-    if crate::server::spawn(tx, wake).is_err() {
+    if crate::server::spawn(tx.clone(), wake).is_err() {
         return;
     }
     let viewport = ViewportBuilder::default()
@@ -123,7 +138,7 @@ pub fn run() {
             #[cfg(not(debug_assertions))]
             let open_req = None;
             let app = App {
-                core: Core::new(), rx, hwnd, region: Vec::new(), trimmed: false, selected: None, open_req, was_down: false, side, settings_open: false, arming: None, press_at: f64::NEG_INFINITY,
+                core: Core::new(tx.clone()), rx, hwnd, region: Vec::new(), trimmed: false, selected: None, open_req, was_down: false, side, settings_open: false, arming: None, press_at: f64::NEG_INFINITY,
                 // Test hook, debug builds only: AGENT_ISLANDS_CLICK=allow|deny answers the first permission card 1 s after it shows.
                 #[cfg(debug_assertions)]
                 auto_click: parse_click(std::env::var("AGENT_ISLANDS_CLICK").ok().as_deref()),
@@ -416,6 +431,22 @@ mod tests {
         json!({"hook_event_name": name, "session_id": sid, "cwd": r"D:\p\x", "transcript_path": "t.jsonl", "tool_name": "Bash", "tool_input": {"command": "ls"}})
     }
 
+    #[test]
+    fn first_event_replays_transcript_once() {
+        let (tx, rx) = channel();
+        let mut c = Core::new(tx);
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/transcript.jsonl");
+        let mut r = raw("SessionStart", "s");
+        r["transcript_path"] = json!(path);
+        c.handle(Msg::Event { raw: r.clone(), chain: vec![], reply: None }, 1);
+        c.handle(Msg::Event { raw: r, chain: vec![], reply: None }, 2);
+        let Ok(Msg::Replay { session_id, todos }) = rx.recv_timeout(Duration::from_secs(2)) else { panic!("no replay") };
+        assert_eq!((session_id.as_str(), todos.len()), ("s", 2));
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "second replay spawned");
+        c.handle(Msg::Replay { session_id: "s".into(), todos }, 3);
+        assert_eq!(c.state.sessions[0].todos.len(), 2);
+    }
+
     fn event(core: &mut Core, name: &str, sid: &str, wants: bool) -> Option<(std::sync::mpsc::Receiver<Reply>, u64)> {
         let (rtx, rrx) = channel();
         let (qtx, qrx) = channel();
@@ -426,7 +457,7 @@ mod tests {
 
     #[test]
     fn answer_sends_reply_and_resolves() {
-        let mut c = Core::new();
+        let mut c = Core::new(channel().0);
         let (rx, id) = event(&mut c, "PermissionRequest", "s", true).unwrap();
         assert_eq!(c.state.permissions.len(), 1);
         c.answer(id, Reply::Allow);
@@ -437,7 +468,7 @@ mod tests {
 
     #[test]
     fn answer_twice_sends_once() {
-        let mut c = Core::new();
+        let mut c = Core::new(channel().0);
         let (rx, id) = event(&mut c, "PermissionRequest", "s", true).unwrap();
         c.answer(id, Reply::Deny);
         c.answer(id, Reply::Allow);
@@ -458,7 +489,7 @@ mod tests {
 
     #[test]
     fn stop_releases_waiting_hook() {
-        let mut c = Core::new();
+        let mut c = Core::new(channel().0);
         let (rx, _) = event(&mut c, "PermissionRequest", "s", true).unwrap();
         let (other, _) = event(&mut c, "PermissionRequest", "t", true).unwrap();
         event(&mut c, "Stop", "s", false);
@@ -469,7 +500,7 @@ mod tests {
 
     #[test]
     fn timeout_msg_marks_timed_out() {
-        let mut c = Core::new();
+        let mut c = Core::new(channel().0);
         let (_rx, id) = event(&mut c, "PermissionRequest", "s", true).unwrap();
         c.handle(Msg::Timeout(id), 2);
         assert!(c.state.permissions[0].timed_out);
@@ -494,7 +525,7 @@ mod tests {
 
     #[test]
     fn tick_exits_after_3s_empty_not_before() {
-        let mut c = Core::new();
+        let mut c = Core::new(channel().0);
         let t = Instant::now();
         assert!(!c.tick(t, 0));
         assert!(!c.tick(t + Duration::from_millis(2900), 0));
@@ -503,7 +534,7 @@ mod tests {
 
     #[test]
     fn tick_does_not_exit_while_session_exists() {
-        let mut c = Core::new();
+        let mut c = Core::new(channel().0);
         event(&mut c, "SessionStart", "s", false);
         let t = Instant::now();
         assert!(!c.tick(t, 0));

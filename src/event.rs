@@ -52,6 +52,49 @@ fn status(s: &str) -> Option<TodoStatus> {
     }
 }
 
+/// Rebuilds a session's todo list from its transcript (JSONL). A call counts only once its
+/// successful result line arrives, so cut-off and failed calls change nothing.
+pub fn replay(text: &str) -> Vec<Todo> {
+    let mut pending: std::collections::HashMap<String, (String, Value)> = Default::default();
+    let mut todos = Vec::new();
+    for line in text.lines() {
+        // Cheap pre-filter: most lines of a big transcript are neither todo calls nor results.
+        if !line.contains("\"tool_use") && !line.contains("\"tool_result") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if !matches!(v["type"].as_str(), Some("assistant" | "user")) {
+            continue;
+        }
+        for item in v["message"]["content"].as_array().into_iter().flatten() {
+            let id = item["id"].as_str();
+            match (item["type"].as_str(), item["name"].as_str(), id) {
+                (Some("tool_use"), Some(name @ ("TaskCreate" | "TaskUpdate" | "TodoWrite")), Some(id)) => {
+                    pending.insert(id.to_owned(), (name.to_owned(), item["input"].clone()));
+                }
+                (Some("tool_result"), ..) => {
+                    let Some((name, input)) = item["tool_use_id"].as_str().and_then(|i| pending.remove(i)) else { continue };
+                    if item["is_error"].as_bool() == Some(true) {
+                        continue;
+                    }
+                    let ev = HookEvent {
+                        name: "PostToolUse".into(),
+                        tool_name: Some(name),
+                        tool_input: input,
+                        tool_response: v["toolUseResult"].clone(),
+                        ..Default::default()
+                    };
+                    if let Some(change) = todo_change(&ev) {
+                        crate::state::apply_todo(&mut todos, change);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    todos
+}
+
 pub fn todo_change(ev: &HookEvent) -> Option<TodoChange> {
     let input = &ev.tool_input;
     let str_of = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
@@ -125,6 +168,29 @@ mod tests {
     #[test]
     fn parse_rejects_payload_without_event_name() {
         assert!(parse(&serde_json::json!({"session_id": "x"})).is_none());
+    }
+
+    #[test]
+    fn replay_rebuilds_task_list() {
+        let list = replay(include_str!("../tests/fixtures/transcript.jsonl"));
+        assert_eq!(list, vec![todo("1", "A", TodoStatus::Completed), todo("2", "B", TodoStatus::Pending)]);
+    }
+
+    #[test]
+    fn replay_todowrite_replaces() {
+        let mut text = include_str!("../tests/fixtures/transcript.jsonl").to_owned();
+        text.push_str("
+{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"w\",\"name\":\"TodoWrite\",\"input\":{\"todos\":[{\"content\":\"X\",\"status\":\"pending\"},{\"content\":\"Y\",\"status\":\"completed\"}]}}]}}
+{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"w\"}]},\"toolUseResult\":{}}
+");
+        assert_eq!(replay(&text), vec![todo("0", "X", TodoStatus::Pending), todo("1", "Y", TodoStatus::Completed)]);
+    }
+
+    #[test]
+    fn replay_empty_and_garbage() {
+        assert!(replay("").is_empty());
+        assert!(replay("x
+{").is_empty());
     }
 
     #[test]
