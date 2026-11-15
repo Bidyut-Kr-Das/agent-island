@@ -3,6 +3,9 @@ use std::sync::Arc;
 
 pub const BG: Color32 = Color32::from_rgb(0x0c, 0x0c, 0x0e);
 pub const LINE: Color32 = Color32::from_rgba_premultiplied(18, 18, 18, 18); // rgba(255,255,255,.07)
+pub const FG: Color32 = Color32::from_rgb(0xf2, 0xf2, 0xf4);
+pub const FG2: Color32 = Color32::from_rgb(0xb4, 0xb4, 0xbc);
+pub const FG3: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x94);
 pub const OK: Color32 = Color32::from_rgb(0x2b, 0xd4, 0x5f);
 pub const WARN: Color32 = Color32::from_rgb(0xff, 0xb8, 0x00);
 pub const SESSION: [Color32; 6] = [

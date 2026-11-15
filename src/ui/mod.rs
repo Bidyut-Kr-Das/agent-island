@@ -100,7 +100,9 @@ pub fn run() {
             win::place(hwnd);
             theme::setup_fonts(&cc.egui_ctx);
             let _ = CTX.set(cc.egui_ctx.clone());
-            Ok(Box::new(App { core: Core::new(), rx, hwnd, trimmed: false }))
+            // Test hook: AGENT_ISLANDS_OPEN=<session id> opens the panel on that session once it exists.
+            let open_req = std::env::var("AGENT_ISLANDS_OPEN").ok();
+            Ok(Box::new(App { core: Core::new(), rx, hwnd, trimmed: false, selected: None, open_req, was_down: false }))
         }),
     );
 }
@@ -110,6 +112,9 @@ struct App {
     rx: Receiver<Msg>,
     hwnd: HWND,
     trimmed: bool,
+    selected: Option<String>,
+    open_req: Option<String>,
+    was_down: bool,
 }
 
 impl eframe::App for App {
@@ -133,11 +138,26 @@ impl eframe::App for App {
             self.trimmed = true;
             win::trim();
         }
-        let r = views::pill(ui, &self.core, t).rect;
+        let sessions = &self.core.state.sessions;
+        if let Some(id) = self.open_req.take_if(|id| sessions.iter().any(|s| &s.id == id)) {
+            self.selected = Some(id);
+        }
+        let pill = views::pill(ui, &self.core, self.selected.as_deref(), t);
+        if pill.clicked() {
+            let clicked = pill.interact_pointer_pos().and_then(|p| views::blob_at(p, pill.rect, sessions.len())).map(|i| sessions[i].id.as_str());
+            self.selected = views::toggle(self.selected.as_deref(), clicked, views::default_selection(sessions));
+        }
+        let r = pill.rect;
+        let panel = views::panel(ui, &self.core, &mut self.selected, r, t);
         // egui sees no hover while passthrough is on, so ask Windows where the cursor is.
-        let over = win::cursor(self.hwnd, ctx.pixels_per_point()).is_some_and(|p| views::hit(p, r));
+        let over = win::cursor(self.hwnd, ctx.pixels_per_point()).is_some_and(|p| views::inside(p, r, panel));
         win::sync_style(self.hwnd, !over);
-        let moving = self.core.state.sessions.iter().any(|s| matches!(s.status, crate::state::Status::Working | crate::state::Status::Waiting(_)));
+        let down = win::left_down();
+        if self.selected.is_some() && views::outside_click(self.was_down, down, over) {
+            self.selected = None;
+        }
+        self.was_down = down;
+        let moving = panel.is_positive() || self.core.state.sessions.iter().any(|s| matches!(s.status, crate::state::Status::Working | crate::state::Status::Waiting(_)));
         ctx.request_repaint_after(Duration::from_millis(if moving { 33 } else { 100 }));
     }
 }
@@ -170,6 +190,12 @@ mod win {
             let (x, y) = (work.left + ((8.0 - MARGIN) * s).round() as i32, work.top + ((96.0 - MARGIN) * s).round() as i32);
             let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
+    }
+
+    /// Left button down now, or pressed since the last call (so short clicks between frames count).
+    pub fn left_down() -> bool {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
+        unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) as u16 & 0x8001 != 0 }
     }
 
     pub fn trim() {
