@@ -98,6 +98,15 @@ fn read_reply(f: std::fs::File) -> Option<Reply> {
     }
 }
 
+/// Only events that create or locate a session's processes need the (slow) process chain.
+fn needs_chain(event: &Value) -> bool {
+    match event["hook_event_name"].as_str() {
+        Some("SessionStart" | "UserPromptSubmit" | "PermissionRequest" | "Notification") => true,
+        Some("PreToolUse") => event["tool_name"] == "AskUserQuestion",
+        _ => false,
+    }
+}
+
 /// Forwards the hook event; returns the stdout text to print, if any.
 fn run_with(name: &str, spawn: bool, input: &str) -> Option<String> {
     let event: Value = serde_json::from_str(input).ok()?;
@@ -111,7 +120,7 @@ fn run_with(name: &str, spawn: bool, input: &str) -> Option<String> {
     }
     let wants_reply = event["hook_event_name"] == "PermissionRequest"
         && event["tool_name"] != "AskUserQuestion";
-    let chain = procs::ancestors(std::process::id());
+    let chain = if needs_chain(&event) { procs::ancestors(std::process::id()) } else { Vec::new() };
     let mut line = json!({"event": event, "chain": chain}).to_string();
     line.push('\n');
     f.write_all(line.as_bytes()).ok()?;
@@ -162,6 +171,27 @@ mod tests {
     #[test]
     fn no_reply_prints_nothing() {
         assert_eq!(decision_output(None, true), None);
+    }
+
+    #[test]
+    fn chain_only_for_events_that_find_processes() {
+        let ev = |name: &str, tool: &str| json!({"hook_event_name": name, "tool_name": tool});
+        for name in ["SessionStart", "UserPromptSubmit", "PermissionRequest", "Notification"] {
+            assert!(needs_chain(&ev(name, "Bash")), "{name}");
+        }
+        assert!(needs_chain(&ev("PreToolUse", "AskUserQuestion")));
+        for name in ["PreToolUse", "PostToolUse", "Stop", "SessionEnd", "TaskCompleted"] {
+            assert!(!needs_chain(&ev(name, "Bash")), "{name}");
+        }
+    }
+
+    #[test]
+    fn post_tool_use_sends_empty_chain() {
+        let name = format!(r"\\.\pipe\ai-test-nochain-{}", std::process::id());
+        let t = serve(&name, None);
+        assert_eq!(run_with(&name, false, r#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#), None);
+        let sent: serde_json::Value = serde_json::from_str(&t.join().unwrap()).unwrap();
+        assert_eq!(sent["chain"], json!([]));
     }
 
     #[test]

@@ -521,6 +521,14 @@ mod tests {
     }
 
     #[test]
+    fn empty_chain_keeps_known_pids() {
+        let mut s = State::default();
+        s.apply(&ev("SessionStart", "a", json!({})), Pids { claude: Some(7), terminal: Some(8) }, 1);
+        s.apply(&ev("PostToolUse", "a", json!({})), crate::procs::find_pids(&[]), 2);
+        assert_eq!((s.sessions[0].claude_pid, s.sessions[0].terminal_pid), (Some(7), Some(8)));
+    }
+
+    #[test]
     fn changed_at_and_pids_and_title_update_per_event() {
         let mut s = State::default();
         s.apply(&ev("SessionStart", "a", json!({})), Pids { claude: Some(7), terminal: Some(8) }, 5);
