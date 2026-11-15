@@ -60,8 +60,9 @@ pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, t: f64) -> e
 }
 
 /// The expanded panel for the selected session, right of `pill`. Closes (sets `selected` to None) when that
-/// session is gone. Returns the panel's current on-screen rect, `Rect::NOTHING` when fully closed.
-pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill: Rect, t: f64) -> Rect {
+/// session is gone. Returns the panel's current on-screen rect (`Rect::NOTHING` when fully closed) and
+/// whether "Go to terminal" was clicked.
+pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill: Rect, t: f64) -> (Rect, bool) {
     let find = |id: &str| core.state.sessions.iter().find(|s| s.id == id);
     if selected.as_deref().is_some_and(|id| find(id).is_none()) {
         *selected = None;
@@ -75,30 +76,24 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
     ui.data_mut(|d| d.insert_temp(key, (open, since, last.clone())));
     let k = spring(((t - since) / 0.25) as f32);
     let k = if open { k } else { 1.0 - k };
-    let Some(s) = last.as_deref().and_then(find).filter(|_| k > 0.0) else { return Rect::NOTHING };
+    let Some(s) = last.as_deref().and_then(find).filter(|_| k > 0.0) else { return (Rect::NOTHING, false) };
 
     // island-left.html .box: 1 px border, 14 / 16 px padding; todo rows 4 px padding, 14 px icon, 10 px gap.
     let inner = PANEL_W - 2.0 - 32.0;
     let text = |s: &str, size: f32, family: &str, color: Color32, width: f32| layout(ui.painter(), &[(s, fmt(size, family, color))], width, 2);
-    let title = text(&s.project, 14.0, "geist-semibold", FG, inner);
+    let title = text(&s.project, 14.0, "geist-semibold", FG, inner - 30.0);
     let path = text(&s.cwd, 11.0, "geist-mono", FG3, inner);
-    // icon: Some(true) check, Some(false) spinner, None none.
-    let row = |icon: Option<bool>, s: &str| {
-        let g = match icon {
-            Some(true) => text(s, 13.0, "geist", FG2, inner - 24.0),
-            Some(false) => text(s, 13.0, "geist-medium", FG, inner - 24.0),
-            None => text(s, 13.0, "geist", FG3, inner),
-        };
-        (icon, g)
-    };
-    let mut rows: Vec<_> = visible_todos(&s.todos).into_iter().map(|td| row(Some(td.status == TodoStatus::Completed), &td.subject)).collect();
-    if rows.is_empty() {
-        match s.status {
-            Status::Working => rows.push(row(Some(false), "Working")),
-            Status::Idle => rows.push(row(None, "Idle")),
-            Status::Waiting(_) => {}
-        }
-    }
+    let rows: Vec<_> = panel_rows(s)
+        .into_iter()
+        .map(|(icon, label)| {
+            let g = match icon {
+                RowIcon::Check | RowIcon::Dot => text(&label, 13.0, "geist", FG2, inner - 24.0),
+                RowIcon::Spinner => text(&label, 13.0, "geist-medium", FG, inner - 24.0),
+                RowIcon::None => text(&label, 13.0, "geist", FG3, inner),
+            };
+            (icon, g)
+        })
+        .collect();
     let heights: Vec<f32> = rows.iter().map(|(_, g)| g.size().y.max(14.0) + 8.0).collect();
     let head = 2.0 + 28.0 + title.size().y + 2.0 + path.size().y + if rows.is_empty() { 0.0 } else { 10.0 };
     let first = first_row(&heights, WIN_H - MARGIN - pill.top() - head);
@@ -119,15 +114,67 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
     for ((icon, g), h) in rows.into_iter().zip(heights).skip(first) {
         let c = pos2(x + 7.0, y + h / 2.0);
         match icon {
-            Some(true) => check(&p, c),
-            Some(false) => spinner(&p, c, t),
-            None => {}
+            RowIcon::Check => check(&p, c),
+            RowIcon::Spinner => spinner(&p, c, t),
+            RowIcon::Dot => {
+                p.circle_filled(c, 3.0, FG3);
+            }
+            RowIcon::None => {}
         }
-        let tx = if icon.is_some() { x + 24.0 } else { x };
+        let tx = if icon == RowIcon::None { x } else { x + 24.0 };
         p.galley(pos2(tx, y + (h - g.size().y) / 2.0), g, FG);
         y += h;
     }
-    r
+    // Go to terminal: only once fully open, and only when the session has a terminal.
+    let mut go = false;
+    if s.terminal_pid.is_some() {
+        let b = terminal_button_rect(full);
+        p.rect(b, 4.0, BTN_BG, Stroke::new(1.0, LINE), StrokeKind::Inside);
+        let (c, st) = (b.center(), Stroke::new(1.5, FG));
+        p.add(Shape::line(vec![c + vec2(-4.0, -3.5), c + vec2(-0.5, 0.0), c + vec2(-4.0, 3.5)], st));
+        p.line_segment([c + vec2(1.5, 4.0), c + vec2(5.0, 4.0)], st);
+        if k >= 1.0 {
+            go = ui.interact(b, Id::unique("go_terminal"), Sense::click()).on_hover_text("Go to terminal").clicked();
+        }
+    }
+    (r, go)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RowIcon {
+    Check,
+    Spinner,
+    Dot,
+    None,
+}
+
+/// Panel rows: the session's todos (completed, in progress); in progress only spins while working.
+pub fn panel_rows(s: &Session) -> Vec<(RowIcon, String)> {
+    let working = s.status == Status::Working;
+    let mut rows: Vec<_> = visible_todos(&s.todos)
+        .into_iter()
+        .map(|td| {
+            let icon = match (td.status, working) {
+                (TodoStatus::Completed, _) => RowIcon::Check,
+                (_, true) => RowIcon::Spinner,
+                _ => RowIcon::Dot,
+            };
+            (icon, td.subject.clone())
+        })
+        .collect();
+    if rows.is_empty() {
+        match s.status {
+            Status::Working => rows.push((RowIcon::Spinner, "Working".into())),
+            Status::Idle => rows.push((RowIcon::None, "No tasks recorded".into())),
+            Status::Waiting(_) => {}
+        }
+    }
+    rows
+}
+
+/// 22 px "Go to terminal" button in the panel's top-right corner.
+pub fn terminal_button_rect(panel: Rect) -> Rect {
+    Rect::from_min_size(pos2(panel.right() - 15.0 - 22.0, panel.top() + 12.0), vec2(22.0, 22.0))
 }
 
 /// Text format for the mockup's type styles (semibold is tracked -.01em, mono has 1.4 line height).
@@ -472,6 +519,42 @@ mod tests {
         let t = [todo("a", TodoStatus::Completed), todo("b", TodoStatus::Pending), todo("c", TodoStatus::InProgress), todo("d", TodoStatus::Completed)];
         let ids: Vec<&str> = visible_todos(&t).iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["a", "c", "d"]);
+    }
+
+    fn sess_with(status: Status, todos: Vec<Todo>) -> Session {
+        Session { status, todos, ..sess("a", 1) }
+    }
+
+    #[test]
+    fn idle_session_rows_show_todos_not_idle() {
+        let s = sess_with(Status::Idle, vec![todo("a", TodoStatus::Completed), todo("b", TodoStatus::Pending), todo("c", TodoStatus::Completed)]);
+        let rows = panel_rows(&s);
+        assert_eq!(rows, vec![(RowIcon::Check, "a".to_string()), (RowIcon::Check, "c".to_string())]);
+        assert!(rows.iter().all(|(_, t)| t != "Idle"));
+    }
+
+    #[test]
+    fn no_todos_idle_shows_no_tasks_recorded() {
+        assert_eq!(panel_rows(&sess_with(Status::Idle, vec![])), vec![(RowIcon::None, "No tasks recorded".to_string())]);
+        assert_eq!(panel_rows(&sess_with(Status::Working, vec![])), vec![(RowIcon::Spinner, "Working".to_string())]);
+    }
+
+    #[test]
+    fn in_progress_row_static_when_not_working() {
+        let t = vec![todo("a", TodoStatus::InProgress)];
+        assert_eq!(panel_rows(&sess_with(Status::Working, t.clone()))[0].0, RowIcon::Spinner);
+        assert_eq!(panel_rows(&sess_with(Status::Idle, t))[0].0, RowIcon::Dot);
+    }
+
+    #[test]
+    fn terminal_button_inside_panel_hit_region_top_right() {
+        let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 100.0));
+        let panel = panel_rect(pill, 120.0);
+        let b = terminal_button_rect(panel);
+        assert!(panel.contains_rect(b));
+        assert!(b.center().x > panel.center().x && b.center().y < panel.center().y, "top-right");
+        let reg = region(pill, &[(panel, 8.0)], 1.0)[1];
+        assert!(b.left() >= reg[0] as f32 && b.right() <= reg[2] as f32 && b.top() >= reg[1] as f32 && b.bottom() <= reg[3] as f32);
     }
 
     #[test]

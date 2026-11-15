@@ -160,7 +160,6 @@ impl State {
             "SessionStart" => s.status = Status::Idle,
             "UserPromptSubmit" => {
                 s.status = Status::Working;
-                s.todos.clear();
                 s.finished = None;
             }
             "Stop" => {
@@ -327,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_sets_working_and_clears_todos_and_finished() {
+    fn prompt_keeps_todos() {
         let mut s = State::default();
         go(&mut s, "PostToolUse", "a", json!({"tool_name": "TaskCreate",
             "tool_input": {"subject": "X"}, "tool_response": {"task": {"id": "1"}}}));
@@ -336,7 +335,7 @@ mod tests {
         assert_eq!(s.sessions[0].finished, Some(Finish::Ok));
         go(&mut s, "UserPromptSubmit", "a", json!({}));
         assert_eq!(s.sessions[0].status, Status::Working);
-        assert!(s.sessions[0].todos.is_empty());
+        assert_eq!(s.sessions[0].todos.len(), 1, "task list persists across prompts");
         assert_eq!(s.sessions[0].finished, None);
     }
 

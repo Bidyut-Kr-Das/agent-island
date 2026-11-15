@@ -131,6 +131,14 @@ pub fn run() {
     );
 }
 
+/// Off the UI thread: UI Automation can be slow, and the island must not freeze.
+fn go_to_terminal(s: &crate::state::Session) {
+    if let Some(pid) = s.terminal_pid {
+        let transcript = std::path::PathBuf::from(&s.transcript);
+        std::thread::spawn(move || crate::focus::go_to_terminal(pid, crate::focus::ai_title(&transcript).as_deref()));
+    }
+}
+
 struct App {
     core: Core,
     rx: Receiver<Msg>,
@@ -231,17 +239,16 @@ impl eframe::App for App {
             View::Waiting(id) => {
                 let (rect, go) = views::waiting_card(ui, &self.core, &id, r, t);
                 let s = self.core.state.sessions.iter().find(|s| s.id == id);
-                if go && let Some(s) = s && let Some(pid) = s.terminal_pid {
-                    // Off the UI thread: UI Automation can be slow, and the island must not freeze.
-                    let transcript = std::path::PathBuf::from(&s.transcript);
-                    std::thread::spawn(move || {
-                        crate::focus::go_to_terminal(pid, crate::focus::ai_title(&transcript).as_deref())
-                    });
+                if go && let Some(s) = s {
+                    go_to_terminal(s);
                 }
                 (rect, 8.0)
             }
             View::Panel | View::Pill => {
-                let panel = views::panel(ui, &self.core, &mut self.selected, r, t);
+                let (panel, go) = views::panel(ui, &self.core, &mut self.selected, r, t);
+                if go && let Some(s) = self.selected.as_deref().and_then(|id| self.core.state.sessions.iter().find(|s| s.id == id)) {
+                    go_to_terminal(s);
+                }
                 if panel.is_positive() {
                     (panel, 8.0)
                 } else {
