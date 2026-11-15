@@ -21,8 +21,12 @@ const PAD_X: f32 = 5.0;
 const PILL_W: f32 = BLOB + 2.0 * PAD_X + 2.0;
 const PANEL_W: f32 = 300.0;
 const CARD_W: f32 = 280.0;
+/// Text width inside the panel; the title leaves 30 px at the right for the terminal button.
+const INNER: f32 = PANEL_W - 2.0 - 32.0;
+const TITLE_AVAIL: f32 = INNER - 30.0;
 pub const WIN_W: f32 = 400.0;
 pub const WIN_H: f32 = 520.0;
+const _: () = assert!(WIN_W >= PANEL_W + PILL_W + 2.0 * MARGIN + 8.0);
 
 /// Left x of the pill inside the window.
 pub fn pill_x(side: Side) -> f32 {
@@ -78,7 +82,7 @@ pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, 
     resp
 }
 
-/// The expanded panel for the selected session, right of `pill`. Closes (sets `selected` to None) when that
+/// The expanded panel for the selected session, beside `pill`. Closes (sets `selected` to None) when that
 /// session is gone. Returns the panel's current on-screen rect (`Rect::NOTHING` when fully closed) and
 /// whether "Go to terminal" was clicked.
 pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill: Rect, side: Side, t: f64) -> (Rect, bool) {
@@ -98,11 +102,11 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
     let Some(s) = last.as_deref().and_then(find).filter(|_| k > 0.0) else { return (Rect::NOTHING, false) };
 
     // island-left.html .box: 1 px border, 14 / 16 px padding; todo rows 4 px padding, 14 px icon, 10 px gap.
-    let inner = PANEL_W - 2.0 - 32.0;
+    let inner = INNER;
     let text = |s: &str, size: f32, family: &str, color: Color32, width: f32| layout(ui.painter(), &[(s, fmt(size, family, color))], width, 2);
-    let name = text(&s.project, 14.0, "geist", FG, inner - 30.0);
+    let name = text(&s.project, 14.0, "geist", FG, TITLE_AVAIL);
     let parent = text(&s.parent, 12.0, "geist", FG3, f32::INFINITY);
-    let row = title_row(if s.parent.is_empty() { 0.0 } else { parent.size().x }, name.size().x, inner);
+    let row = title_row(if s.parent.is_empty() { 0.0 } else { parent.size().x }, name.size().x, TITLE_AVAIL);
     let title_h = name.size().y;
     let rows: Vec<_> = panel_rows(s)
         .into_iter()
@@ -308,7 +312,7 @@ pub fn blob_at(p: Pos2, pill: Rect, n: usize) -> Option<usize> {
     (rel >= 0.0 && (i as usize) < n && rel - i * (BLOB + GAP) <= BLOB).then_some(i as usize)
 }
 
-/// Panel at full size: 8 px right of the pill, top-aligned, no taller than the window allows.
+/// Panel at full size: 8 px beside the pill, top-aligned, no taller than the window allows.
 pub fn panel_rect(pill: Rect, h: f32, side: Side) -> Rect {
     Rect::from_min_size(pos2(beside(pill, PANEL_W, side), pill.top()), vec2(PANEL_W, h.min(WIN_H - MARGIN - pill.top())))
 }
@@ -541,13 +545,13 @@ fn blob_top(pill: Rect, i: usize) -> f32 {
     pill.top() + 1.0 + PAD_Y + i as f32 * (BLOB + GAP)
 }
 
-/// Card 8 px right of the pill, top-aligned with blob `i`, moved up if needed to fit the window.
+/// Card 8 px beside the pill, top-aligned with blob `i`, moved up if needed to fit the window.
 pub fn card_rect(pill: Rect, i: usize, h: f32, side: Side) -> Rect {
     let top = blob_top(pill, i).min(WIN_H - MARGIN - h).max(MARGIN);
     Rect::from_min_size(pos2(beside(pill, CARD_W, side), top), vec2(CARD_W, h))
 }
 
-/// Label 8 px right of the pill, vertically centered on blob `i`.
+/// Label 8 px beside the pill, vertically centered on blob `i`.
 pub fn label_rect(pill: Rect, i: usize, size: Vec2, side: Side) -> Rect {
     Rect::from_min_size(pos2(beside(pill, size.x, side), blob_top(pill, i) + BLOB / 2.0 - size.y / 2.0), size)
 }
@@ -605,6 +609,20 @@ mod tests {
         assert_eq!(r.name - (r.chevron + CHEV_HALF), 8.0);
         assert!(title_row(0.0, 80.0, 200.0).parent.is_none());
         assert!(title_row(150.0, 80.0, 200.0).parent.is_none());
+    }
+
+    #[test]
+    fn kept_parent_name_ends_left_of_terminal_button() {
+        let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 100.0));
+        let full = panel_rect(pill, 120.0, Side::Left);
+        let x = full.left() + 17.0;
+        for name_w in 1..=TITLE_AVAIL as u32 {
+            let name_w = name_w as f32;
+            let row = title_row(40.0, name_w, TITLE_AVAIL);
+            if row.parent.is_some() {
+                assert!(x + row.name + name_w <= terminal_button_rect(full).left(), "name_w {name_w}");
+            }
+        }
     }
 
     #[test]

@@ -36,14 +36,16 @@ impl Core {
             Msg::Event { raw, chain, reply } => {
                 let Some(ev) = event::parse(&raw) else { return };
                 let known = self.state.sessions.iter().any(|s| s.id == ev.session_id);
-                if !known && !ev.transcript_path.is_empty() {
+                if !known && !ev.transcript_path.is_empty() && ev.name != "SessionEnd" {
                     // Rebuild todos on the worker thread; transcripts can be tens of MB.
                     // ponytail: the UI sees the result on its next frame, up to 3 s when idle; no wake here.
                     // ponytail: a replay landing after live todo events overwrites them with the transcript's
                     // state, which already contains them, unless the transcript write lags the hook.
                     let (tx, path, session_id) = (self.tx.clone(), ev.transcript_path.clone(), ev.session_id.clone());
                     std::thread::spawn(move || {
-                        if let Ok(text) = std::fs::read_to_string(path) {
+                        // A live transcript can end inside a multi-byte character.
+                        if let Ok(bytes) = std::fs::read(path) {
+                            let text = String::from_utf8_lossy(&bytes);
                             let _ = tx.send(Msg::Replay { session_id, todos: event::replay(&text) });
                         }
                     });
@@ -221,6 +223,7 @@ impl eframe::App for App {
             self.settings_open = !self.settings_open;
         }
         if pill.clicked() {
+            self.settings_open = false;
             let sessions = &self.core.state.sessions;
             let clicked = pill.interact_pointer_pos().and_then(|p| views::blob_at(p, pill.rect, sessions.len())).map(|i| &sessions[i]);
             if let Some(s) = clicked.filter(|s| BlobState::of(s.status, s.finished) == BlobState::Done) {
@@ -445,6 +448,33 @@ mod tests {
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "second replay spawned");
         c.handle(Msg::Replay { session_id: "s".into(), todos }, 3);
         assert_eq!(c.state.sessions[0].todos.len(), 2);
+    }
+
+    #[test]
+    fn replay_survives_trailing_invalid_utf8() {
+        let (tx, rx) = channel();
+        let mut c = Core::new(tx);
+        let mut bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/transcript.jsonl")).unwrap();
+        bytes.extend_from_slice(b"\xE2\x82");
+        let path = std::env::temp_dir().join(format!("ai-utf8-{}.jsonl", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        let mut r = raw("SessionStart", "s");
+        r["transcript_path"] = json!(path.to_str().unwrap());
+        c.handle(Msg::Event { raw: r, chain: vec![], reply: None }, 1);
+        let got = rx.recv_timeout(Duration::from_secs(2));
+        let _ = std::fs::remove_file(&path);
+        let Ok(Msg::Replay { todos, .. }) = got else { panic!("no replay") };
+        assert_eq!(todos.len(), 2);
+    }
+
+    #[test]
+    fn session_end_for_unknown_session_spawns_no_replay() {
+        let (tx, rx) = channel();
+        let mut c = Core::new(tx);
+        let mut r = raw("SessionEnd", "s");
+        r["transcript_path"] = json!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/transcript.jsonl"));
+        c.handle(Msg::Event { raw: r, chain: vec![], reply: None }, 1);
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "replay spawned for SessionEnd");
     }
 
     fn event(core: &mut Core, name: &str, sid: &str, wants: bool) -> Option<(std::sync::mpsc::Receiver<Reply>, u64)> {
