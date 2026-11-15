@@ -117,7 +117,7 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
     let first = first_row(&heights, WIN_H - MARGIN - pill.top() - head);
     let full = panel_rect(pill, head + heights[first..].iter().sum::<f32>(), side);
 
-    let r = Rect::from_min_size(full.min, full.size() * (0.6 + 0.4 * k));
+    let r = grow(full, k, side);
     let mut p = ui.painter().clone();
     p.multiply_opacity(k);
     p.add(Shadow { offset: [0, 12], blur: 32, spread: 0, color: Color32::from_black_alpha(128) }.as_shape(r, 8.0));
@@ -276,6 +276,13 @@ pub fn blob_at(p: Pos2, pill: Rect, n: usize) -> Option<usize> {
 /// Panel at full size: 8 px right of the pill, top-aligned, no taller than the window allows.
 pub fn panel_rect(pill: Rect, h: f32, side: Side) -> Rect {
     Rect::from_min_size(pos2(beside(pill, PANEL_W, side), pill.top()), vec2(PANEL_W, h.min(WIN_H - MARGIN - pill.top())))
+}
+
+/// `full` scaled to 60..100% by `k`, anchored at its edge nearest the pill.
+pub fn grow(full: Rect, k: f32, side: Side) -> Rect {
+    let size = full.size() * (0.6 * (1.0 - k) + k);
+    let x = if side == Side::Right { full.right() - size.x } else { full.left() };
+    Rect::from_min_size(pos2(x, full.top()), size)
 }
 
 /// Index of the first row to draw so the last rows fit into `avail`.
@@ -694,6 +701,16 @@ mod tests {
         let v: Vec<f32> = (0..=10).map(|i| spring(i as f32 / 10.0)).collect();
         assert!(v.windows(2).all(|w| w[1] >= w[0]), "no overshoot: {v:?}");
         assert!(v[5] > 0.8, "critically damped, mostly there by half time: {}", v[5]);
+    }
+
+    #[test]
+    fn grow_stays_anchored_at_the_pill_edge() {
+        let full = Rect::from_min_size(pos2(50.0, 8.0), vec2(300.0, 200.0));
+        assert_eq!(grow(full, 0.0, Side::Right).right(), full.right());
+        assert_eq!(grow(full, 0.0, Side::Left).left(), full.left());
+        assert!((grow(full, 0.0, Side::Left).width() - 180.0).abs() < 1e-3);
+        assert_eq!(grow(full, 1.0, Side::Right), full);
+        assert_eq!(grow(full, 1.0, Side::Left), full);
     }
 
     #[test]
