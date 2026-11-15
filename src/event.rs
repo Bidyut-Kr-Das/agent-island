@@ -13,6 +13,8 @@ pub struct HookEvent {
     pub notification_type: Option<String>,
     pub session_title: Option<String>,
     pub mcp_server: Option<String>,
+    /// Set by the island server from the hook envelope, never by Claude Code.
+    pub gated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -39,6 +41,7 @@ pub fn parse(raw: &Value) -> Option<HookEvent> {
         notification_type: text("notification_type"),
         session_title: text("session_title"),
         mcp_server: text("mcp_server"),
+        gated: raw["gated"] == true,
     })
 }
 

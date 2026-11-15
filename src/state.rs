@@ -169,10 +169,13 @@ impl State {
                 s.finished = Some(Finish::Error);
             }
             "PermissionRequest" if ask => s.status = Status::Waiting(WaitKind::Question),
-            "PermissionRequest" => {
+            "PermissionRequest" | "PreToolUse" if ev.name == "PermissionRequest" || ev.gated => {
                 self.next_req += 1;
                 let mcp = ev.mcp_server.as_deref();
-                let (verb, full) = crate::detail::full_line(tool, &ev.tool_input, mcp);
+                let (mut verb, full) = crate::detail::full_line(tool, &ev.tool_input, mcp);
+                if ev.gated {
+                    verb = "Wants to run a gated command".to_owned();
+                }
                 let (_, detail) = crate::detail::detail_line(tool, &ev.tool_input, mcp);
                 self.permissions.push_back(Permission {
                     req_id: self.next_req,
@@ -406,6 +409,24 @@ mod tests {
         s.timeout(id);
         assert!(s.permissions[0].timed_out);
         assert_eq!(status(&s, "a"), Status::Waiting(WaitKind::Other));
+    }
+
+    #[test]
+    fn gated_pretooluse_queues_permission_with_gated_verb() {
+        let mut s = State::default();
+        let id = go(&mut s, "PreToolUse", "a", json!({"tool_name": "PowerShell", "tool_input": {"command": "git push"}, "gated": true}));
+        assert!(id.is_some());
+        let p = &s.permissions[0];
+        assert_eq!((p.verb.as_str(), p.detail.as_str(), p.full.as_str()), ("Wants to run a gated command", "git push", "git push"));
+        assert_eq!(status(&s, "a"), Status::Waiting(WaitKind::Permission));
+    }
+
+    #[test]
+    fn ungated_pretooluse_never_queues() {
+        let mut s = State::default();
+        let id = go(&mut s, "PreToolUse", "a", json!({"tool_name": "PowerShell", "tool_input": {"command": "git push"}}));
+        assert_eq!(id, None);
+        assert!(s.permissions.is_empty());
     }
 
     #[test]

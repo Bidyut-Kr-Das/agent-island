@@ -3,6 +3,7 @@
 mod detail;
 mod event;
 mod focus;
+mod gate;
 mod hook;
 mod pipe;
 mod server;

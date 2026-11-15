@@ -1,4 +1,4 @@
-use crate::{pipe, procs};
+use crate::{gate, pipe, procs};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::process::CommandExt;
@@ -29,6 +29,18 @@ pub fn decision_output(reply: Option<Reply>, verified: bool) -> Option<String> {
     Some(format!(
         r#"{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{decision}}}}}"#
     ))
+}
+
+/// Gated PreToolUse (spec 9a): always prints a decision; allow only with a verified island and a click.
+pub fn pretool_output(reply: Option<Reply>, verified: bool, timed_out: bool) -> String {
+    let deny = |why: &str| format!(r#""deny","permissionDecisionReason":"{why}""#);
+    let decision = match (verified, reply) {
+        (true, Some(Reply::Allow)) => r#""allow""#.to_owned(),
+        (true, Some(Reply::Deny)) => deny("Denied from Agent Islands"),
+        (true, None) if timed_out => deny("No answer in Agent Islands within 30 seconds"),
+        _ => deny("Agent Islands is not running"),
+    };
+    format!(r#"{{"hookSpecificOutput":{{"hookEventName":"PreToolUse","permissionDecision":{decision}}}}}"#)
 }
 
 fn canon(p: &Path) -> String {
@@ -84,7 +96,8 @@ fn connect_retry(name: &str, spawn: bool) -> Option<(std::fs::File, u32, bool)> 
     }
 }
 
-fn read_reply(f: std::fs::File) -> Option<Reply> {
+/// The island's decision: "allow", "deny", or "timeout" (gated requests only).
+fn read_reply(f: std::fs::File) -> Option<String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut line = String::new();
@@ -92,7 +105,11 @@ fn read_reply(f: std::fs::File) -> Option<Reply> {
         let _ = tx.send(line);
     });
     let line = rx.recv_timeout(Duration::from_secs(35)).ok()?;
-    match serde_json::from_str::<Value>(&line).ok()?["decision"].as_str()? {
+    Some(serde_json::from_str::<Value>(&line).ok()?["decision"].as_str()?.to_owned())
+}
+
+fn to_reply(d: Option<&str>) -> Option<Reply> {
+    match d? {
         "allow" => Some(Reply::Allow),
         "deny" => Some(Reply::Deny),
         _ => None,
@@ -113,6 +130,13 @@ fn needs_chain(event: &Value, spawned: bool) -> bool {
 /// Forwards the hook event; returns the stdout text to print, if any.
 fn run_with(name: &str, spawn: bool, input: &str) -> Option<String> {
     let event: Value = serde_json::from_str(input).ok()?;
+    let gated = event["hook_event_name"] == "PreToolUse"
+        && gate::is_gated(event["tool_name"].as_str().unwrap_or_default(), event["tool_input"]["command"].as_str().unwrap_or_default());
+    let out = forward(name, spawn, event, gated);
+    if gated { Some(out.unwrap_or_else(|| pretool_output(None, false, false))) } else { out }
+}
+
+fn forward(name: &str, spawn: bool, event: Value, gated: bool) -> Option<String> {
     let (mut f, server_pid, spawned) = connect_retry(name, spawn)?;
     let verified = match (procs::exe_path(server_pid), std::env::current_exe()) {
         (Some(a), Ok(b)) => same_exe(&a, &b),
@@ -123,14 +147,22 @@ fn run_with(name: &str, spawn: bool, input: &str) -> Option<String> {
     }
     let wants_reply = event["hook_event_name"] == "PermissionRequest"
         && event["tool_name"] != "AskUserQuestion";
-    let chain = if needs_chain(&event, spawned) { procs::ancestors(std::process::id()) } else { Vec::new() };
-    let mut line = json!({"event": event, "chain": chain}).to_string();
+    let chain = if gated || needs_chain(&event, spawned) { procs::ancestors(std::process::id()) } else { Vec::new() };
+    let mut msg = json!({"event": event, "chain": chain});
+    if gated {
+        msg["gated"] = json!(true);
+    }
+    let mut line = msg.to_string();
     line.push('\n');
     f.write_all(line.as_bytes()).ok()?;
+    if gated {
+        let d = read_reply(f);
+        return Some(pretool_output(to_reply(d.as_deref()), verified, d.as_deref() == Some("timeout")));
+    }
     if !wants_reply {
         return None;
     }
-    decision_output(read_reply(f), verified)
+    decision_output(to_reply(read_reply(f).as_deref()), verified)
 }
 
 pub fn run() -> i32 {
@@ -252,6 +284,78 @@ mod tests {
         assert_eq!(run_with(&name, false, input), None);
         assert!(start.elapsed() < Duration::from_secs(3));
         t.join().unwrap();
+    }
+
+    const GATED: &str = r#"{"hook_event_name":"PreToolUse","tool_name":"PowerShell","tool_input":{"command":"git push"}}"#;
+    fn pre_deny(reason: &str) -> String {
+        format!(r#"{{"hookSpecificOutput":{{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"{reason}"}}}}"#)
+    }
+
+    #[test]
+    fn gated_allow_verified_prints_pretool_allow() {
+        let want = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#;
+        assert_eq!(pretool_output(Some(Reply::Allow), true, false), want);
+        let name = format!(r"\\.\pipe\ai-test-gallow-{}", std::process::id());
+        let t = serve(&name, Some("{\"decision\":\"allow\"}\n"));
+        assert_eq!(run_with(&name, false, GATED).as_deref(), Some(want));
+        let sent: serde_json::Value = serde_json::from_str(&t.join().unwrap()).unwrap();
+        assert_eq!(sent["gated"], true);
+    }
+
+    #[test]
+    fn gated_deny_prints_reason() {
+        assert_eq!(pretool_output(Some(Reply::Deny), true, false), pre_deny("Denied from Agent Islands"));
+        let name = format!(r"\\.\pipe\ai-test-gdeny-{}", std::process::id());
+        let t = serve(&name, Some("{\"decision\":\"deny\"}\n"));
+        assert_eq!(run_with(&name, false, GATED), Some(pre_deny("Denied from Agent Islands")));
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn gated_timeout_prints_deny_with_timeout_reason() {
+        let want = pre_deny("No answer in Agent Islands within 30 seconds");
+        assert_eq!(pretool_output(None, true, true), want);
+        let name = format!(r"\\.\pipe\ai-test-gtimeout-{}", std::process::id());
+        let t = serve(&name, Some("{\"decision\":\"timeout\"}\n"));
+        assert_eq!(run_with(&name, false, GATED), Some(want));
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn gated_unverified_or_unreachable_prints_deny_not_running() {
+        let want = pre_deny("Agent Islands is not running");
+        assert_eq!(pretool_output(Some(Reply::Allow), false, false), want);
+        assert_eq!(pretool_output(Some(Reply::Deny), false, false), want);
+        assert_eq!(pretool_output(None, false, true), want);
+        assert_eq!(pretool_output(None, true, false), want, "connection broke without a reply");
+        let name = format!(r"\\.\pipe\ai-test-gnobody-{}", std::process::id());
+        assert_eq!(run_with(&name, false, GATED), Some(want.clone()));
+        let name = format!(r"\\.\pipe\ai-test-gbroke-{}", std::process::id());
+        let t = serve(&name, None);
+        assert_eq!(run_with(&name, false, GATED), Some(want));
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn ungated_pretool_prints_nothing_and_does_not_wait() {
+        let name = format!(r"\\.\pipe\ai-test-ungated-{}", std::process::id());
+        let mut server = Server::create_first_named(&name).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        // Holds the connection open after reading, so a waiting hook would block.
+        let t = std::thread::spawn(move || {
+            let f = server.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&f).read_line(&mut line).unwrap();
+            let _ = rx.recv_timeout(Duration::from_secs(5));
+            line
+        });
+        let start = Instant::now();
+        let input = r#"{"hook_event_name":"PreToolUse","tool_name":"PowerShell","tool_input":{"command":"git status"}}"#;
+        assert_eq!(run_with(&name, false, input), None);
+        assert!(start.elapsed() < Duration::from_secs(2));
+        tx.send(()).unwrap();
+        let sent: serde_json::Value = serde_json::from_str(&t.join().unwrap()).unwrap();
+        assert_eq!(sent.get("gated"), None);
     }
 
     #[test]

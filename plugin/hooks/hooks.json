@@ -29,7 +29,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agent-islands.exe\" hook",
-            "timeout": 5
+            "timeout": 40
           }
         ]
       }

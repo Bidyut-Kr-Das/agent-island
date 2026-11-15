@@ -28,4 +28,11 @@ Format: what to do -> what should happen.
 - [ ] With more than one waiting session -> card shows "1 of N" and you can step through them.
 
 ## Command gate
-(Placeholder for Task 11. Items to be added.)
+Run each item in a scratch git repo, once in auto mode and once in manual (default) mode.
+- [ ] Auto mode: ask Claude to run `git status` -> no card; the command runs.
+- [ ] Auto mode: ask Claude to run `git commit --allow-empty -m test` -> card "Wants to run a gated command" with the command shown; Deny blocks it (Claude sees "Denied from Agent Islands").
+- [ ] Auto mode: same command again -> Allow runs it (`git log` shows the commit).
+- [ ] Manual mode: `git status` -> no gate card (Claude Code's own prompt, if any, as before).
+- [ ] Manual mode: `git commit --allow-empty -m test` -> gate card appears; Deny blocks it; Allow runs it.
+- [ ] Gate card ignores clicks in its first 600 ms and until the pointer moves onto it, like the permission card.
+- [ ] Leave the gate card unanswered for 30 s -> command is denied ("No answer in Agent Islands within 30 seconds").
