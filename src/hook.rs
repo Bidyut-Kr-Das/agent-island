@@ -43,12 +43,17 @@ pub fn pretool_output(reply: Option<Reply>, verified: bool, timed_out: bool) -> 
     format!(r#"{{"hookSpecificOutput":{{"hookEventName":"PreToolUse","permissionDecision":{decision}}}}}"#)
 }
 
-fn canon(p: &Path) -> String {
-    p.canonicalize().unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().to_lowercase()
-}
-
+/// Same file content. Two installs of one build must match; any IO error means not the same.
 pub fn same_exe(a: &Path, b: &Path) -> bool {
-    canon(a) == canon(b)
+    let (Ok(ca), Ok(cb)) = (a.canonicalize(), b.canonicalize()) else { return false };
+    if ca.to_string_lossy().to_lowercase() == cb.to_string_lossy().to_lowercase() {
+        return true;
+    }
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(&ca), std::fs::metadata(&cb)) else { return false };
+    if ma.len() != mb.len() {
+        return false;
+    }
+    matches!((std::fs::read(&ca), std::fs::read(&cb)), (Ok(x), Ok(y)) if x == y)
 }
 
 /// The island must not inherit Claude Code's stdio pipes, or the hook call never completes.
@@ -250,6 +255,29 @@ mod tests {
         let upper = std::path::PathBuf::from(exe.to_string_lossy().to_uppercase());
         assert!(same_exe(&exe, &upper));
         assert!(!same_exe(&exe, std::path::Path::new(r"C:\Windows\notepad.exe")));
+    }
+
+    #[test]
+    fn same_exe_true_for_byte_identical_copy() {
+        let exe = std::env::current_exe().unwrap();
+        let copy = std::env::temp_dir().join(format!("ai-same-exe-{}.exe", std::process::id()));
+        std::fs::copy(&exe, &copy).unwrap();
+        let r = same_exe(&exe, &copy);
+        let _ = std::fs::remove_file(&copy);
+        assert!(r);
+    }
+
+    #[test]
+    fn same_exe_false_for_different_content() {
+        let exe = std::env::current_exe().unwrap();
+        assert!(!same_exe(&exe, Path::new(r"C:\Windows\notepad.exe")));
+    }
+
+    #[test]
+    fn same_exe_false_when_unreadable() {
+        let exe = std::env::current_exe().unwrap();
+        assert!(!same_exe(&exe, Path::new(r"C:\no\such\agent-islands.exe")));
+        assert!(!same_exe(Path::new(r"C:\no\such\a.exe"), Path::new(r"C:\no\such\a.exe")));
     }
 
     fn serve(name: &str, reply: Option<&'static str>) -> std::thread::JoinHandle<String> {
