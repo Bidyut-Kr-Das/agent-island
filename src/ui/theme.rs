@@ -1,8 +1,8 @@
 use eframe::egui::{Color32, Context, FontData, FontDefinitions, FontFamily};
 use std::sync::Arc;
 
-pub const BG: Color32 = Color32::from_rgb(0x0c, 0x0c, 0x0e);
-pub const LINE: Color32 = Color32::from_rgba_premultiplied(18, 18, 18, 18); // rgba(255,255,255,.07)
+pub const BG: Color32 = Color32::from_rgb(0x1c, 0x1d, 0x22);
+pub const LINE: Color32 = Color32::from_rgba_premultiplied(36, 36, 36, 36); // rgba(255,255,255,.14)
 pub const FG: Color32 = Color32::from_rgb(0xf2, 0xf2, 0xf4);
 pub const FG2: Color32 = Color32::from_rgb(0xb4, 0xb4, 0xbc);
 pub const FG3: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x94);
@@ -31,4 +31,15 @@ pub fn setup_fonts(ctx: &Context) {
     f.families.insert(FontFamily::Proportional, vec!["geist".into()]);
     f.families.insert(FontFamily::Monospace, vec!["geist-mono".into()]);
     ctx.set_fonts(f);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bg_and_line_values() {
+        assert_eq!(BG, Color32::from_rgb(0x1c, 0x1d, 0x22));
+        assert_eq!(LINE, Color32::from_white_alpha(36));
+    }
 }

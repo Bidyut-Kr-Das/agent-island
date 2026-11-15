@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 /// The pill's top-left inside the window; the margin keeps the shadow from being cut off.
 pub const MARGIN: f32 = 8.0;
+/// egui zoom factor; `ctx.pixels_per_point()` already includes it.
+pub const ZOOM: f32 = 1.25;
 
 const BLOB: f32 = 22.0;
 const GAP: f32 = 6.0;
@@ -20,7 +22,8 @@ const PAD_X: f32 = 5.0;
 const PILL_W: f32 = BLOB + 2.0 * PAD_X + 2.0;
 const PANEL_W: f32 = 300.0;
 const CARD_W: f32 = 280.0;
-const WIN_H: f32 = 520.0;
+pub const WIN_W: f32 = 400.0;
+pub const WIN_H: f32 = 520.0;
 
 /// Outer pill height for `n` blobs (island-left.html .vpill: 1 px border, 10 px padding, 22 px blobs, 6 px gap).
 pub fn pill_height(n: usize) -> f32 {
