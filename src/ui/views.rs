@@ -12,10 +12,8 @@ use std::sync::Arc;
 
 /// The pill's top-left inside the window; the margin keeps the shadow from being cut off.
 pub const MARGIN: f32 = 8.0;
-/// egui zoom factor; `ctx.pixels_per_point()` already includes it.
-pub const ZOOM: f32 = 1.25;
 
-const BLOB: f32 = 22.0;
+const BLOB: f32 = 24.0;
 const GAP: f32 = 6.0;
 const PAD_Y: f32 = 10.0;
 const PAD_X: f32 = 5.0;
@@ -25,7 +23,7 @@ const CARD_W: f32 = 280.0;
 pub const WIN_W: f32 = 400.0;
 pub const WIN_H: f32 = 520.0;
 
-/// Outer pill height for `n` blobs (island-left.html .vpill: 1 px border, 10 px padding, 22 px blobs, 6 px gap).
+/// Outer pill height for `n` blobs (island-left.html .vpill: 1 px border, 10 px padding, 24 px blobs, 6 px gap).
 pub fn pill_height(n: usize) -> f32 {
     if n == 0 { 0.0 } else { 2.0 + 2.0 * PAD_Y + n as f32 * BLOB + (n - 1) as f32 * GAP }
 }
@@ -84,13 +82,13 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
     // island-left.html .box: 1 px border, 14 / 16 px padding; todo rows 4 px padding, 14 px icon, 10 px gap.
     let inner = PANEL_W - 2.0 - 32.0;
     let text = |s: &str, size: f32, family: &str, color: Color32, width: f32| layout(ui.painter(), &[(s, fmt(size, family, color))], width, 2);
-    let title = text(&s.project, 14.0, "geist-semibold", FG, inner - 30.0);
+    let title = text(&s.project, 14.0, "geist", SESSION[s.color % SESSION.len()], inner - 30.0);
     let rows: Vec<_> = panel_rows(s)
         .into_iter()
         .map(|(icon, label)| {
             let g = match icon {
-                RowIcon::Check | RowIcon::Dot => text(&label, 13.0, "geist", FG2, inner - 24.0),
-                RowIcon::Spinner => text(&label, 13.0, "geist-medium", FG, inner - 24.0),
+                RowIcon::Check | RowIcon::Dot => text(&label, 13.0, "geist", FG3, inner - 24.0),
+                RowIcon::Spinner => text(&label, 13.0, "geist", FG, inner - 24.0),
                 RowIcon::None => text(&label, 13.0, "geist", FG3, inner),
             };
             (icon, g)
@@ -177,12 +175,9 @@ pub fn terminal_button_rect(panel: Rect) -> Rect {
     Rect::from_min_size(pos2(panel.right() - 15.0 - 22.0, panel.top() + 12.0), vec2(22.0, 22.0))
 }
 
-/// Text format for the mockup's type styles (semibold is tracked -.01em, mono has 1.4 line height).
+/// Text format for the mockup's type styles (mono has 1.4 line height).
 fn fmt(size: f32, family: &str, color: Color32) -> TextFormat {
     let mut f = TextFormat::simple(FontId::new(size, FontFamily::Name(family.into())), color);
-    if family == "geist-semibold" {
-        f.extra_letter_spacing = -0.01 * size;
-    }
     if family == "geist-mono" {
         f.line_height = Some(size * 1.4);
     }
@@ -253,7 +248,7 @@ pub fn region(pill: Rect, others: &[(Rect, f32)], ppp: f32) -> Vec<[i32; 5]> {
     pill.into_iter().chain(others).map(|(r, rad)| [px(r.left()), px(r.top()), px(r.right()), px(r.bottom()), px(2.0 * rad)]).collect()
 }
 
-/// Index of the blob whose 22 px box contains `p.y`.
+/// Index of the blob whose BLOB-sized box contains `p.y`.
 pub fn blob_at(p: Pos2, pill: Rect, n: usize) -> Option<usize> {
     let rel = p.y - pill.top() - 1.0 - PAD_Y;
     let i = (rel / (BLOB + GAP)).floor();
@@ -299,7 +294,7 @@ fn card(ui: &mut egui::Ui, core: &Core, s: &Session, key: impl Hash + std::fmt::
     let inner = CARD_W - 2.0 - 32.0;
     let corner = corner.map(|c| layout(&p, &[(&c, fmt(11.0, "geist", FG3))], inner, 1));
     let cw = corner.as_ref().map_or(0.0, |g| g.size().x + 8.0);
-    let title = layout(&p, &[(&s.project, fmt(14.0, "geist-semibold", FG))], inner - 30.0 - cw, 1);
+    let title = layout(&p, &[(&s.project, fmt(14.0, "geist", SESSION[s.color % SESSION.len()]))], inner - 30.0 - cw, 1);
     let meta = layout(&p, &[(meta, fmt(12.0, "geist", FG2))], inner, 2);
     let cmd = cmd.map(|c| {
         let mut f = fmt(12.0, "geist-mono", FG);
@@ -345,7 +340,7 @@ fn card(ui: &mut egui::Ui, core: &Core, s: &Session, key: impl Hash + std::fmt::
         let b = Rect::from_min_size(pos2(x + k as f32 * (w + 8.0), y), vec2(w, btn_h));
         let stroke = if border { Stroke::new(1.0, LINE) } else { Stroke::NONE };
         p.rect(b, 4.0, fill, stroke, StrokeKind::Inside);
-        let g = layout(&p, &[(label, fmt(12.5, "geist-medium", color))], w, 1);
+        let g = layout(&p, &[(label, fmt(12.5, "geist", color))], w, 1);
         p.galley(b.center() - g.size() / 2.0, g, color);
         if ui.interact(b, btn_id(key, k), Sense::click()).clicked() {
             clicked = clicked.or(Some(k));
@@ -430,7 +425,7 @@ pub fn finished_pill(ui: &mut egui::Ui, core: &Core, pill: Rect) -> (Rect, Optio
     let sessions = &core.state.sessions;
     let Some((i, bold, muted)) = finished_label(sessions) else { return (Rect::NOTHING, None) };
     let p = ui.painter().clone();
-    let g = layout(&p, &[(&bold, fmt(12.5, "geist-semibold", FG)), (" ", fmt(12.5, "geist", FG2)), (muted, fmt(12.5, "geist", FG2))], f32::INFINITY, 1);
+    let g = layout(&p, &[(&bold, fmt(12.5, "geist", SESSION[sessions[i].color % SESSION.len()])), (" ", fmt(12.5, "geist", FG2)), (muted, fmt(12.5, "geist", FG2))], f32::INFINITY, 1);
     let r = label_rect(pill, i, g.size() + vec2(26.0, 14.0));
     p.add(Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(115) }.as_shape(r, r.height() / 2.0));
     p.rect(r, r.height() / 2.0, BG, Stroke::new(1.0, LINE), StrokeKind::Inside);
@@ -471,7 +466,7 @@ pub fn of_n(q: &VecDeque<Permission>) -> Option<String> {
     (n > 1).then(|| format!("1 of {n}"))
 }
 
-/// (index of the topmost finished blob, semibold part, muted part) for the finished label.
+/// (index of the topmost finished blob, bold part (session color), muted part) for the finished label.
 pub fn finished_label(sessions: &[Session]) -> Option<(usize, String, &'static str)> {
     let done: Vec<usize> = (0..sessions.len()).filter(|&i| BlobState::of(sessions[i].status, sessions[i].finished) == BlobState::Done).collect();
     let &i = done.first()?;
@@ -611,7 +606,7 @@ mod tests {
         let r = region(pill, &[(card, 8.0), (label, 15.0)], 2.0);
         assert_eq!(r.len(), 3);
         assert_eq!(r[1], [100, 38, 660, 338, 32]);
-        assert_eq!(r[2], [100, 86, 340, 146, 60], "capsule label");
+        assert_eq!(r[2], [100, 92, 340, 152, 60], "capsule label");
     }
 
     #[test]
@@ -628,13 +623,13 @@ mod tests {
     #[test]
     fn blob_at_maps_blob_boxes() {
         let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, pill_height(3)));
-        // Blob i spans y = 8 + 1 + 10 + i * 28 .. + 22.
+        // Blob i spans y = 8 + 1 + 10 + i * 30 .. + 24.
         assert_eq!(blob_at(pos2(25.0, 19.0), pill, 3), Some(0));
-        assert_eq!(blob_at(pos2(25.0, 19.0 + 28.0 + 11.0), pill, 3), Some(1));
-        assert_eq!(blob_at(pos2(25.0, 19.0 + 56.0 + 21.0), pill, 3), Some(2));
-        assert_eq!(blob_at(pos2(25.0, 19.0 + 24.0), pill, 3), None, "gap");
+        assert_eq!(blob_at(pos2(25.0, 19.0 + 30.0 + 11.0), pill, 3), Some(1));
+        assert_eq!(blob_at(pos2(25.0, 19.0 + 60.0 + 21.0), pill, 3), Some(2));
+        assert_eq!(blob_at(pos2(25.0, 19.0 + 27.0), pill, 3), None, "gap");
         assert_eq!(blob_at(pos2(25.0, 12.0), pill, 3), None, "top padding");
-        assert_eq!(blob_at(pos2(25.0, 19.0 + 84.0), pill, 3), None, "below the last blob");
+        assert_eq!(blob_at(pos2(25.0, 19.0 + 90.0), pill, 3), None, "below the last blob");
     }
 
     #[test]
@@ -658,8 +653,9 @@ mod tests {
     #[test]
     fn pill_height_matches_mockup_box() {
         assert_eq!(pill_height(0), 0.0);
-        assert_eq!(pill_height(1), 44.0);
-        assert_eq!(pill_height(4), 2.0 + 20.0 + 4.0 * 22.0 + 3.0 * 6.0);
+        assert_eq!(BLOB, 24.0);
+        assert_eq!(pill_height(1), 2.0 + 2.0 * PAD_Y + 24.0);
+        assert_eq!(pill_height(4), 2.0 + 2.0 * PAD_Y + 4.0 * BLOB + 3.0 * GAP);
     }
 
     fn perm(req_id: u64, sid: &str, timed_out: bool) -> crate::state::Permission {
@@ -725,16 +721,16 @@ mod tests {
     #[test]
     fn card_sits_8px_right_top_aligned_with_blob_and_fits() {
         let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, pill_height(4)));
-        // Blob 2 top: 8 + 1 + 10 + 2 * 28.
-        assert_eq!(card_rect(pill, 2, 150.0), Rect::from_min_size(pos2(50.0, 75.0), vec2(280.0, 150.0)));
+        // Blob 2 top: 8 + 1 + 10 + 2 * 30.
+        assert_eq!(card_rect(pill, 2, 150.0), Rect::from_min_size(pos2(50.0, 79.0), vec2(280.0, 150.0)));
         assert_eq!(card_rect(pill, 2, 480.0).bottom(), 520.0 - MARGIN, "pushed up to fit the window");
     }
 
     #[test]
     fn label_centered_on_blob_8px_right() {
         let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, pill_height(2)));
-        // Blob 1 center: 8 + 1 + 10 + 28 + 11 = 58.
-        assert_eq!(label_rect(pill, 1, vec2(120.0, 28.0)), Rect::from_min_size(pos2(50.0, 44.0), vec2(120.0, 28.0)));
+        // Blob 1 center: 8 + 1 + 10 + 30 + 12 = 61.
+        assert_eq!(label_rect(pill, 1, vec2(120.0, 28.0)), Rect::from_min_size(pos2(50.0, 47.0), vec2(120.0, 28.0)));
     }
 
     #[test]

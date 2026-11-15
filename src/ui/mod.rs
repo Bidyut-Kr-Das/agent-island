@@ -95,7 +95,7 @@ pub fn run() {
     }
     let viewport = ViewportBuilder::default()
         .with_title("Agent Islands")
-        .with_inner_size([views::WIN_W * views::ZOOM, views::WIN_H * views::ZOOM])
+        .with_inner_size([views::WIN_W, views::WIN_H])
         .with_resizable(false)
         .with_transparent(true)
         .with_decorations(false)
@@ -114,7 +114,6 @@ pub fn run() {
             win::no_frame(hwnd);
             win::place(hwnd);
             theme::setup_fonts(&cc.egui_ctx);
-            cc.egui_ctx.set_zoom_factor(views::ZOOM);
             let _ = CTX.set(cc.egui_ctx.clone());
             // Test hook, debug builds only: AGENT_ISLANDS_OPEN=<session id> opens the panel on that session once it exists.
             #[cfg(debug_assertions)]
@@ -288,7 +287,7 @@ impl eframe::App for App {
 }
 
 mod win {
-    use super::{Pos2, views::{MARGIN, ZOOM}};
+    use super::{Pos2, views::MARGIN};
     use windows::Win32::Foundation::{HWND, POINT, RECT};
     use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
     use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
@@ -311,7 +310,7 @@ mod win {
         unsafe {
             let _ = SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut work as *mut RECT as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
             let _ = GetDpiForMonitor(MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY), MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y);
-            let s = dpi as f32 / 96.0 * ZOOM;
+            let s = dpi as f32 / 96.0;
             let (x, y) = (work.left + ((8.0 - MARGIN) * s).round() as i32, work.top + ((96.0 - MARGIN) * s).round() as i32);
             let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }

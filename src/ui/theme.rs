@@ -21,8 +21,6 @@ pub fn setup_fonts(ctx: &Context) {
     let mut f = FontDefinitions::empty();
     for (name, bytes) in [
         ("geist", &include_bytes!("../../assets/fonts/Geist-Regular.ttf")[..]),
-        ("geist-medium", &include_bytes!("../../assets/fonts/Geist-Medium.ttf")[..]),
-        ("geist-semibold", &include_bytes!("../../assets/fonts/Geist-SemiBold.ttf")[..]),
         ("geist-mono", &include_bytes!("../../assets/fonts/GeistMono-Regular.ttf")[..]),
     ] {
         f.font_data.insert(name.into(), Arc::new(FontData::from_static(bytes)));
