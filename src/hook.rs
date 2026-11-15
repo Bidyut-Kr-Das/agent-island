@@ -60,17 +60,18 @@ fn no_inherit_std_handles() {
     }
 }
 
+fn island_command(exe: &Path) -> Command {
+    let mut cmd = Command::new(exe);
+    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    // Never the project folder: the island would lock it and add it to the DLL search path.
+    cmd.current_dir(exe.parent().unwrap_or(Path::new(r"C:\")));
+    cmd
+}
+
 fn spawn_island() {
     no_inherit_std_handles();
     let Ok(exe) = std::env::current_exe() else { return };
-    let go = |flags: u32| {
-        Command::new(&exe)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(flags)
-            .spawn()
-    };
+    let go = |flags: u32| island_command(&exe).creation_flags(flags).spawn();
     let base = DETACHED_PROCESS | CREATE_NO_WINDOW;
     if go(base | CREATE_BREAKAWAY_FROM_JOB).is_err() {
         let _ = go(base);
@@ -356,6 +357,14 @@ mod tests {
         tx.send(()).unwrap();
         let sent: serde_json::Value = serde_json::from_str(&t.join().unwrap()).unwrap();
         assert_eq!(sent.get("gated"), None);
+    }
+
+    #[test]
+    fn island_runs_from_its_own_folder() {
+        let exe = Path::new(r"C:\plugins\agent-islands\agent-islands.exe");
+        let cmd = island_command(exe);
+        assert_eq!(cmd.get_current_dir(), Some(Path::new(r"C:\plugins\agent-islands")));
+        assert_eq!(cmd.get_program(), exe.as_os_str());
     }
 
     #[test]
