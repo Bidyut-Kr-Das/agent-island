@@ -67,6 +67,16 @@ impl Core {
     }
 }
 
+/// AGENT_ISLANDS_CLICK value to the reply it simulates; only the exact values `allow` and `deny`.
+#[cfg(debug_assertions)]
+fn parse_click(v: Option<&str>) -> Option<Reply> {
+    match v? {
+        "allow" => Some(Reply::Allow),
+        "deny" => Some(Reply::Deny),
+        _ => None,
+    }
+}
+
 static CTX: OnceLock<egui::Context> = OnceLock::new();
 
 /// Runs the island until every session is gone. Returns at once if another island owns the pipe.
@@ -104,9 +114,12 @@ pub fn run() {
             let _ = CTX.set(cc.egui_ctx.clone());
             // Test hook: AGENT_ISLANDS_OPEN=<session id> opens the panel on that session once it exists.
             let open_req = std::env::var("AGENT_ISLANDS_OPEN").ok();
-            // Test hook: AGENT_ISLANDS_CLICK=allow|deny answers the first permission card 1 s after it shows.
-            let auto_click = std::env::var("AGENT_ISLANDS_CLICK").ok();
-            let app = App { core: Core::new(), rx, hwnd, trimmed: false, selected: None, open_req, was_down: false, auto_click, card_since: None };
+            let app = App {
+                core: Core::new(), rx, hwnd, trimmed: false, selected: None, open_req, was_down: false, card_since: None,
+                // Test hook, debug builds only: AGENT_ISLANDS_CLICK=allow|deny answers the first permission card 1 s after it shows.
+                #[cfg(debug_assertions)]
+                auto_click: parse_click(std::env::var("AGENT_ISLANDS_CLICK").ok().as_deref()),
+            };
             Ok(Box::new(app))
         }),
     );
@@ -120,9 +133,10 @@ struct App {
     selected: Option<String>,
     open_req: Option<String>,
     was_down: bool,
-    auto_click: Option<String>,
-    /// The permission card on screen and when it appeared (for AGENT_ISLANDS_CLICK).
+    /// The permission request on the card and when it appeared.
     card_since: Option<(u64, f64)>,
+    #[cfg(debug_assertions)]
+    auto_click: Option<Reply>,
 }
 
 impl App {
@@ -183,8 +197,13 @@ impl eframe::App for App {
                 if self.card_since.is_none_or(|(c, _)| c != id) {
                     self.card_since = Some((id, t));
                 }
-                if self.card_since.is_some_and(|(_, t0)| t - t0 >= 1.0) && let Some(c) = self.auto_click.take() {
-                    reply = reply.or(Some(if c == "deny" { Reply::Deny } else { Reply::Allow }));
+                let since = self.card_since.map_or(t, |(_, t0)| t0);
+                if !views::clickable(since, t) {
+                    reply = None;
+                }
+                #[cfg(debug_assertions)]
+                if t - since >= 1.0 && reply.is_none() {
+                    reply = self.auto_click.take();
                 }
                 if let Some(reply) = reply {
                     self.core.answer(id, reply);
@@ -337,6 +356,17 @@ mod tests {
         c.answer(id, Reply::Allow);
         assert!(matches!(rx.try_recv(), Ok(Reply::Deny)));
         assert!(rx.try_recv().is_err(), "second answer must not send");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn click_hook_accepts_only_exact_values() {
+        assert!(matches!(parse_click(Some("allow")), Some(Reply::Allow)));
+        assert!(matches!(parse_click(Some("deny")), Some(Reply::Deny)));
+        for v in ["1", "yes", "Allow", "DENY", " allow", "allow ", ""] {
+            assert!(parse_click(Some(v)).is_none(), "{v:?} must not auto-click");
+        }
+        assert!(parse_click(None).is_none());
     }
 
     #[test]

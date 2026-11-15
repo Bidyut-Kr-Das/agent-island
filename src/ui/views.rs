@@ -1,6 +1,7 @@
 use super::Core;
 use crate::state::{Finish, Permission, Session, Todo, TodoStatus, WaitKind};
 use std::collections::VecDeque;
+use std::hash::Hash;
 use super::blob::{BlobState, paint_blob};
 use super::theme::{BG, FG, FG2, FG3, LINE, OK, SESSION, WARN};
 use crate::hook::Reply;
@@ -237,7 +238,7 @@ type Btn<'a> = (&'a str, Color32, Color32, bool);
 /// Card beside session `s`'s blob (island-blob.html states 4 and 5, island-left.html state 3 placement):
 /// waiting blob and project, `meta`, optional command box, buttons. Returns its rect and the clicked button.
 #[allow(clippy::too_many_arguments)]
-fn card(ui: &mut egui::Ui, core: &Core, s: &Session, meta: &str, corner: Option<String>, cmd: Option<&Permission>, btns: &[Btn], pill: Rect, t: f64) -> (Rect, Option<usize>) {
+fn card(ui: &mut egui::Ui, core: &Core, s: &Session, key: impl Hash + std::fmt::Debug + Copy, meta: &str, corner: Option<String>, cmd: Option<&Permission>, btns: &[Btn], pill: Rect, t: f64) -> (Rect, Option<usize>) {
     let p = ui.painter().clone();
     let inner = CARD_W - 2.0 - 32.0;
     let corner = corner.map(|c| layout(&p, &[(&c, fmt(11.0, "geist", FG3))], inner, 1));
@@ -286,11 +287,22 @@ fn card(ui: &mut egui::Ui, core: &Core, s: &Session, meta: &str, corner: Option<
         p.rect(b, 4.0, fill, stroke, StrokeKind::Inside);
         let g = layout(&p, &[(label, fmt(12.5, "geist-medium", color))], w, 1);
         p.galley(b.center() - g.size() / 2.0, g, color);
-        if ui.interact(b, Id::unique(("btn", &s.id, k)), Sense::click()).clicked() {
+        if ui.interact(b, btn_id(key, k), Sense::click()).clicked() {
             clicked = clicked.or(Some(k));
         }
     }
     (r, clicked)
+}
+
+/// Id of button `k` on the card for `key` (the request id on permission cards), so a click pressed on
+/// one request can never land on the next request that takes the card's place.
+pub fn btn_id(key: impl Hash + std::fmt::Debug, k: usize) -> Id {
+    Id::unique(("btn", key, k))
+}
+
+/// Allow/Deny ignore clicks for 300 ms after a new request appears on the card (`since` is when it appeared).
+pub fn clickable(since: f64, now: f64) -> bool {
+    now - since >= 0.3
 }
 
 /// Permission card for `req_id` (spec 7.4). Returns its rect and the user's answer, if clicked this frame.
@@ -299,14 +311,14 @@ pub fn permission_card(ui: &mut egui::Ui, core: &Core, req_id: u64, pill: Rect, 
     let Some(perm) = st.permissions.iter().find(|p| p.req_id == req_id) else { return (Rect::NOTHING, None) };
     let Some(s) = st.sessions.iter().find(|s| s.id == perm.session_id) else { return (Rect::NOTHING, None) };
     let btns = [("Deny", BTN_BG, DENY, true), ("Allow", OK, ALLOW_FG, false)];
-    let (r, k) = card(ui, core, s, &perm.verb, of_n(&st.permissions), Some(perm), &btns, pill, t);
+    let (r, k) = card(ui, core, s, req_id, &perm.verb, of_n(&st.permissions), Some(perm), &btns, pill, t);
     (r, k.map(|k| if k == 0 { Reply::Deny } else { Reply::Allow }))
 }
 
 /// Waiting card for session `id` (spec 7.5). Returns its rect and whether "Go to terminal" was clicked.
 pub fn waiting_card(ui: &mut egui::Ui, core: &Core, id: &str, pill: Rect, t: f64) -> (Rect, bool) {
     let Some(s) = core.state.sessions.iter().find(|s| s.id == id) else { return (Rect::NOTHING, false) };
-    let (r, k) = card(ui, core, s, waiting_text(s.status), None, None, &[("Go to terminal", BTN_BG, FG, true)], pill, t);
+    let (r, k) = card(ui, core, s, id, waiting_text(s.status), None, None, &[("Go to terminal", BTN_BG, FG, true)], pill, t);
     (r, k.is_some())
 }
 
@@ -560,6 +572,21 @@ mod tests {
         let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, pill_height(2)));
         // Blob 1 center: 8 + 1 + 10 + 28 + 11 = 58.
         assert_eq!(label_rect(pill, 1, vec2(120.0, 28.0)), Rect::from_min_size(pos2(50.0, 44.0), vec2(120.0, 28.0)));
+    }
+
+    #[test]
+    fn button_ids_are_keyed_by_request() {
+        assert_ne!(btn_id(1u64, 1), btn_id(2u64, 1), "same button, next request of the same session");
+        assert_ne!(btn_id(1u64, 0), btn_id(1u64, 1));
+        assert_eq!(btn_id(1u64, 1), btn_id(1u64, 1), "stable across frames");
+    }
+
+    #[test]
+    fn buttons_ignore_clicks_for_300ms_after_a_new_request() {
+        assert!(!clickable(10.0, 10.0));
+        assert!(!clickable(10.0, 10.29));
+        assert!(clickable(10.0, 10.3));
+        assert!(clickable(10.0, 60.0));
     }
 
     #[test]
