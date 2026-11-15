@@ -8,7 +8,7 @@ Format: what to do -> what should happen.
 - [ ] Give one session a long task with todos -> its blob bounces; expanded view shows the todo list updating.
 - [ ] Trigger a permission prompt (e.g. a Bash command not allowed) and click Allow -> tool runs; card closes; session returns to working.
 - [ ] Same, click Deny -> tool is denied with "Denied from Agent Islands"; card closes.
-- [ ] Same, do nothing for 40 s (the hook timeout) -> card changes to "Waiting for you" with "Go to terminal"; the normal terminal prompt appears.
+- [ ] Same, do nothing for 30 s (the island timeout) -> card changes to "Waiting for you" with "Go to terminal"; the normal terminal prompt appears.
 - [ ] Make Claude ask a question (AskUserQuestion) -> card opens "Has a question for you"; "Go to terminal" focuses the right terminal.
 - [ ] Let a session finish -> "finished" pill appears; clicking it clears it.
 - [ ] Close all Claude Code sessions -> island exits within about 3 s (check Task Manager for `agent-islands.exe`).
@@ -24,8 +24,7 @@ Format: what to do -> what should happen.
 - [ ] Click a blob -> its panel/card expands.
 - [ ] Click inside the panel (non-button area) -> panel stays open.
 - [ ] Click outside the panel -> panel closes.
-- [ ] Hover a blob -> tooltip shows the session/project name.
-- [ ] With more than one waiting session -> card shows "1 of N" and you can step through them.
+- [ ] With more than one pending permission card (any sessions) -> the card shows the oldest one with "1 of N" (N = pending cards); there is no stepping: answer it and the next oldest takes its place.
 
 ## Command gate
 Run each item in a scratch git repo, once in auto mode and once in manual (default) mode.
