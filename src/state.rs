@@ -1,4 +1,6 @@
 use std::collections::VecDeque;
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 
 use crate::event::{HookEvent, TodoChange};
 
@@ -81,6 +83,14 @@ fn project_name(cwd: &str) -> String {
     cwd.trim_end_matches(parts).rsplit(parts).next().unwrap_or_default().to_owned()
 }
 
+/// A random color index in 0..6, preferring ones not in `used`.
+fn pick_color(used: &[usize], seed: u64) -> usize {
+    let free: Vec<usize> = (0..6).filter(|c| !used.contains(c)).collect();
+    let all = [0, 1, 2, 3, 4, 5];
+    let candidates = if free.is_empty() { &all[..] } else { &free[..] };
+    candidates[seed as usize % candidates.len()]
+}
+
 fn apply_todo(todos: &mut Vec<Todo>, change: TodoChange) {
     match change {
         TodoChange::Replace(list) => *todos = list,
@@ -121,9 +131,8 @@ impl State {
         let idx = match self.sessions.iter().position(|s| s.id == sid) {
             Some(i) => i,
             None => {
-                let color = (0..6)
-                    .find(|c| !self.sessions.iter().any(|s| s.color == *c))
-                    .unwrap_or(self.sessions.len() % 6);
+                let used: Vec<usize> = self.sessions.iter().map(|s| s.color).collect();
+                let color = pick_color(&used, RandomState::new().hash_one(sid));
                 self.sessions.push(Session {
                     id: sid.to_owned(),
                     project: project_name(&ev.cwd),
@@ -622,24 +631,46 @@ mod tests {
     }
 
     #[test]
-    fn seventh_session_reuses_first_color() {
-        let mut s = State::default();
-        for i in 0..7 {
-            go(&mut s, "SessionStart", &i.to_string(), json!({}));
+    fn pick_color_avoids_used() {
+        for seed in 0..200 {
+            assert!([1, 4].contains(&pick_color(&[0, 2, 3, 5], seed)), "seed {seed}");
         }
-        let colors: Vec<_> = s.sessions.iter().map(|x| x.color).collect();
-        assert_eq!(colors, vec![0, 1, 2, 3, 4, 5, 0]);
     }
 
     #[test]
-    fn freed_color_is_reused() {
+    fn pick_color_any_when_all_used() {
+        for seed in 0..200 {
+            assert!(pick_color(&[0, 1, 2, 3, 4, 5], seed) < 6);
+        }
+    }
+
+    #[test]
+    fn pick_color_spreads() {
+        let seen: std::collections::HashSet<_> = (0..200).map(|seed| pick_color(&[], seed)).collect();
+        assert!(seen.len() >= 4);
+    }
+
+    #[test]
+    fn six_sessions_get_six_distinct_colors() {
         let mut s = State::default();
-        for i in 0..3 {
+        for i in 0..6 {
             go(&mut s, "SessionStart", &i.to_string(), json!({}));
         }
-        go(&mut s, "SessionEnd", "1", json!({}));
+        let mut colors: Vec<_> = s.sessions.iter().map(|x| x.color).collect();
+        colors.sort();
+        assert_eq!(colors, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn freed_color_is_the_only_one_reused() {
+        let mut s = State::default();
+        for i in 0..6 {
+            go(&mut s, "SessionStart", &i.to_string(), json!({}));
+        }
+        let freed = s.sessions[2].color;
+        go(&mut s, "SessionEnd", "2", json!({}));
         go(&mut s, "SessionStart", "new", json!({}));
-        assert_eq!(s.sessions.last().unwrap().color, 1);
+        assert_eq!(s.sessions.last().unwrap().color, freed);
     }
 
     #[test]
