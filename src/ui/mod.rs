@@ -115,8 +115,11 @@ pub fn run() {
             win::place(hwnd);
             theme::setup_fonts(&cc.egui_ctx);
             let _ = CTX.set(cc.egui_ctx.clone());
-            // Test hook: AGENT_ISLANDS_OPEN=<session id> opens the panel on that session once it exists.
+            // Test hook, debug builds only: AGENT_ISLANDS_OPEN=<session id> opens the panel on that session once it exists.
+            #[cfg(debug_assertions)]
             let open_req = std::env::var("AGENT_ISLANDS_OPEN").ok();
+            #[cfg(not(debug_assertions))]
+            let open_req = None;
             let app = App {
                 core: Core::new(), rx, hwnd, region: Vec::new(), trimmed: false, selected: None, open_req, was_down: false, arming: None, press_at: f64::NEG_INFINITY,
                 // Test hook, debug builds only: AGENT_ISLANDS_CLICK=allow|deny answers the first permission card 1 s after it shows.

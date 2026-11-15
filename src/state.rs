@@ -46,7 +46,6 @@ pub struct Session {
     pub status: Status,
     pub todos: Vec<Todo>,
     pub finished: Option<Finish>,
-    pub title: Option<String>,
     pub claude_pid: Option<u32>,
     pub terminal_pid: Option<u32>,
     pub changed_at: u64,
@@ -134,7 +133,6 @@ impl State {
                     status: Status::Idle,
                     todos: Vec::new(),
                     finished: None,
-                    title: None,
                     claude_pid: None,
                     terminal_pid: None,
                     changed_at: now,
@@ -155,9 +153,6 @@ impl State {
         s.changed_at = now;
         s.claude_pid = pids.claude.or(s.claude_pid);
         s.terminal_pid = pids.terminal.or(s.terminal_pid);
-        if ev.session_title.is_some() {
-            s.title = ev.session_title.clone();
-        }
         let tool = ev.tool_name.as_deref().unwrap_or_default();
         let ask = tool == "AskUserQuestion";
         let mut req_id = None;
@@ -666,13 +661,12 @@ mod tests {
     }
 
     #[test]
-    fn changed_at_and_pids_and_title_update_per_event() {
+    fn changed_at_and_pids_update_per_event() {
         let mut s = State::default();
         s.apply(&ev("SessionStart", "a", json!({})), Pids { claude: Some(7), terminal: Some(8) }, 5);
-        s.apply(&ev("Stop", "a", json!({"session_title": "T"})), Pids::default(), 9);
+        s.apply(&ev("Stop", "a", json!({})), Pids::default(), 9);
         let x = &s.sessions[0];
         assert_eq!((x.changed_at, x.claude_pid, x.terminal_pid), (9, Some(7), Some(8)));
-        assert_eq!(x.title.as_deref(), Some("T"));
     }
 
     #[test]

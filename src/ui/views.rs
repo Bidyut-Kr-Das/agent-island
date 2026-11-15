@@ -463,7 +463,7 @@ mod tests {
     fn sess(id: &str, changed_at: u64) -> Session {
         Session {
             id: id.into(), project: id.into(), cwd: String::new(), transcript: String::new(), color: 0, status: Status::Idle,
-            todos: vec![], finished: None, title: None, claude_pid: None, terminal_pid: None, changed_at,
+            todos: vec![], finished: None, claude_pid: None, terminal_pid: None, changed_at,
         }
     }
 

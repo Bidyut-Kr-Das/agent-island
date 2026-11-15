@@ -17,7 +17,8 @@ const ERROR_FILE_NOT_FOUND: i32 = 2;
 const ERROR_PIPE_BUSY: i32 = 231;
 
 pub fn pipe_name() -> String {
-    // Test-only override so tests never touch a real island.
+    // Test-only override so tests never touch a real island; debug builds only.
+    #[cfg(debug_assertions)]
     if let Ok(n) = std::env::var("AGENT_ISLANDS_PIPE") {
         return n;
     }
@@ -92,11 +93,6 @@ impl Server {
         let next = create_instance(&self.name, false)?;
         Ok(File::from(std::mem::replace(&mut self.pending, next)))
     }
-}
-
-#[allow(dead_code)]
-pub fn connect() -> io::Result<(File, u32)> {
-    connect_to(&pipe_name())
 }
 
 /// Opens the pipe once, waiting up to 500 ms if all instances are busy.
