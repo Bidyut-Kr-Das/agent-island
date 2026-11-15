@@ -1,5 +1,5 @@
 {
   "name": "agent-islands",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Dynamic-island style overlay showing Claude Code session status, permissions and questions"
 }
