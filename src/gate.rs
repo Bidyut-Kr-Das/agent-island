@@ -8,8 +8,8 @@
 /// Gated wherever they appear as a word.
 const COMMANDS: &[&str] = &["rm", "rmdir", "del", "erase", "rd", "remove-item", "ri"];
 
-/// Gated when one of the two words after the tool (flags skipped) is a listed subcommand. Two words,
-/// not one, so a flag value (`git -C dir push`, `npm --prefix x install`) cannot hide it.
+/// Gated when ANY later word is a listed subcommand of the tool, so no option or option value
+/// (`git -C "a b" -c k=v push`) can hide it. Over-gates `git log foo push`, by choice.
 /// `python -m pip install` and `uv pip install` are caught by the pip entry.
 const SUBCOMMANDS: &[(&str, &[&str])] = &[
     ("git", &["commit", "push", "reset"]),
@@ -47,12 +47,7 @@ pub fn is_gated(tool: &str, command: &str) -> bool {
     words.iter().enumerate().any(|(i, w)| {
         COMMANDS.contains(&w.as_str())
             || SUBCOMMANDS.iter().any(|(t, subs)| {
-                t == w
-                    && words[i + 1..]
-                        .iter()
-                        .filter(|x| !x.starts_with(['-', '+']))
-                        .take(2)
-                        .any(|x| subs.contains(&x.as_str()))
+                t == w && words[i + 1..].iter().any(|x| subs.contains(&x.as_str()))
             })
     })
 }
@@ -151,6 +146,9 @@ mod tests {
             "(rm x)", "{ rm x; }", "echo $(rm x)", "echo `rm x`", "ls | % { rm $_ }", "if (1) { git push }",
             // line continuations
             "git \\\npush", "git `\npush", "git\\\npush",
+            // option values that fill or split a word window
+            "git -c a=b -c c=d commit", "git -C dir -c k=v push", r#"git -C "D:\My Projects\x" push"#,
+            r#"git -c user.name="A B" commit"#, r#"npm --prefix "my dir" install"#,
             // other forms
             "uv pip install x", "python3 -m pip install x",
         ] {
