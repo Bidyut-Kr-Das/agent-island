@@ -4,6 +4,8 @@ mod detail;
 #[allow(dead_code)]
 mod event;
 #[allow(dead_code)]
+mod procs;
+#[allow(dead_code)]
 mod state;
 
 fn main() {}
