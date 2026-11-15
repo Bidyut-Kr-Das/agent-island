@@ -331,3 +331,23 @@ If any later task's field names disagree with `spike.md`, `spike.md` wins; updat
 - [ ] **Step 2: Install with `claude --plugin-dir plugin` (or a local marketplace) and run the full checklist:** 5 terminals with Claude Code show 5 blobs; one working shows bounce and todos; permission Allow/Deny/timeout; question opens card and "Go to terminal"; finished pill appears and clears on click; closing all sessions exits the island within about 3 s (verify in Task Manager); island never steals typing focus.
 - [ ] **Step 3: Measure** hook latency (`Measure-Command { Get-Content tests/fixtures/PostToolUse.json | plugin/bin/agent-islands.exe hook }`, expect under 20 ms with island running), island RAM under 30 MB, CPU near 0 when all idle.
 - [ ] **Step 4: Commit `feat: plugin packaging`.**
+
+---
+
+### Task 11: Command gate (spec Section 9a)
+
+**Files:** Create `src/gate.rs`. Modify `src/hook.rs`, `src/server.rs`, `src/state.rs`, `plugin/hooks/hooks.json`.
+
+**Interfaces:**
+- Produces:
+  ```rust
+  pub fn is_gated(tool: &str, command: &str) -> bool   // only Bash and PowerShell are ever gated
+  pub fn pretool_output(reply: Option<Reply>, verified: bool, timed_out: bool) -> String
+  ```
+  The hook client calls `is_gated` on `PreToolUse` for `Bash|PowerShell`. Gated: send the event with a "gated" flag, wait for the reply like a permission request, print `pretool_output`. The island treats a gated `PreToolUse` exactly like a `PermissionRequest` (same queue, card, 30 s timeout, `Core::answer`), with verb "Wants to run a gated command". `hooks.json`: `PreToolUse` timeout becomes 40.
+
+- [ ] **Step 1: Failing tests in `gate.rs`:** `gates_each_listed_prefix` (one assert per list entry from spec 9a); `matches_any_segment` (`cargo build && git push` gated; `echo a | rm x` gated); `case_insensitive_whole_words` (`Remove-Item x` and `remove-item x` gated; `rmx`, `git committee`, `npm installer` not gated; `npm i -D x` gated); `builds_tests_typechecks_not_gated` (`cargo build`, `cargo test`, `npm run build`, `npx tsc --noEmit`, `pytest`, `git status`, `git log` not gated); `other_tools_never_gated` (`Edit` with any text).
+- [ ] **Step 2: Failing tests in `hook.rs`:** `gated_allow_verified_prints_pretool_allow`; `gated_deny_prints_reason`; `gated_timeout_prints_deny_with_timeout_reason`; `gated_unverified_or_unreachable_prints_deny_not_running` (never allow); `ungated_pretool_prints_nothing_and_does_not_wait`.
+- [ ] **Step 3: Failing test in `state.rs`:** `gated_pretooluse_queues_permission_with_gated_verb`.
+- [ ] **Step 4: Run, fail. Step 5: Implement. Step 6: `cargo test` passes.**
+- [ ] **Step 7: Manual check (user):** in auto mode, ask Claude to run `git status` (no card) and `git commit --allow-empty -m test` in a scratch repo (card appears; Deny blocks it; Allow runs it). Commit `feat: command gate`.
