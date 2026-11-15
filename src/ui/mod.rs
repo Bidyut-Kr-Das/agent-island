@@ -115,7 +115,7 @@ pub fn run() {
             // Test hook: AGENT_ISLANDS_OPEN=<session id> opens the panel on that session once it exists.
             let open_req = std::env::var("AGENT_ISLANDS_OPEN").ok();
             let app = App {
-                core: Core::new(), rx, hwnd, trimmed: false, selected: None, open_req, was_down: false, card_since: None,
+                core: Core::new(), rx, hwnd, trimmed: false, selected: None, open_req, was_down: false, arming: None, press_at: f64::NEG_INFINITY,
                 // Test hook, debug builds only: AGENT_ISLANDS_CLICK=allow|deny answers the first permission card 1 s after it shows.
                 #[cfg(debug_assertions)]
                 auto_click: parse_click(std::env::var("AGENT_ISLANDS_CLICK").ok().as_deref()),
@@ -133,8 +133,10 @@ struct App {
     selected: Option<String>,
     open_req: Option<String>,
     was_down: bool,
-    /// The permission request on the card and when it appeared.
-    card_since: Option<(u64, f64)>,
+    /// Pointer history for the permission card on screen.
+    arming: Option<views::Arming>,
+    /// When the latest mouse press started (egui time).
+    press_at: f64,
     #[cfg(debug_assertions)]
     auto_click: Option<Reply>,
 }
@@ -191,18 +193,26 @@ impl eframe::App for App {
             }
         }
         let r = pill.rect;
+        let cursor = win::cursor(self.hwnd, ctx.pixels_per_point());
+        let (pressed, start) = ui.input(|i| (i.pointer.any_pressed(), i.pointer.press_start_time()));
+        self.press_at = views::press_time(self.press_at, pressed, start, t);
         let panel = match view {
             View::Permission(id) => {
-                let (rect, mut reply) = views::permission_card(ui, &self.core, id, r, t);
-                if self.card_since.is_none_or(|(c, _)| c != id) {
-                    self.card_since = Some((id, t));
+                let shown = self.arming.filter(|a| a.req == id).is_some_and(|a| views::armed(a.appeared, t, a.entered));
+                let (rect, mut reply) = views::permission_card(ui, &self.core, id, shown, r, t);
+                let over = cursor.is_some_and(|p| rect.contains(p));
+                let a = self.arming.get_or_insert(views::Arming::new(id, t, over));
+                if a.req != id {
+                    *a = views::Arming::new(id, t, over);
                 }
-                let since = self.card_since.map_or(t, |(_, t0)| t0);
-                if !views::clickable(since, t) {
+                a.update(over);
+                let a = *a;
+                if !views::armed(a.appeared, self.press_at, a.entered) {
                     reply = None;
                 }
+                // The test hook bypasses the pointer rules; it does not exist in release builds.
                 #[cfg(debug_assertions)]
-                if t - since >= 1.0 && reply.is_none() {
+                if t - a.appeared >= 1.0 && reply.is_none() {
                     reply = self.auto_click.take();
                 }
                 if let Some(reply) = reply {
@@ -232,7 +242,7 @@ impl eframe::App for App {
             }
         };
         // egui sees no hover while passthrough is on, so ask Windows where the cursor is.
-        let over = win::cursor(self.hwnd, ctx.pixels_per_point()).is_some_and(|p| views::inside(p, r, panel));
+        let over = cursor.is_some_and(|p| views::inside(p, r, panel));
         win::sync_style(self.hwnd, !over);
         let down = win::left_down();
         if self.selected.is_some() && views::outside_click(self.was_down, down, over) {

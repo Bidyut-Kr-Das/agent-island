@@ -238,7 +238,7 @@ type Btn<'a> = (&'a str, Color32, Color32, bool);
 /// Card beside session `s`'s blob (island-blob.html states 4 and 5, island-left.html state 3 placement):
 /// waiting blob and project, `meta`, optional command box, buttons. Returns its rect and the clicked button.
 #[allow(clippy::too_many_arguments)]
-fn card(ui: &mut egui::Ui, core: &Core, s: &Session, key: impl Hash + std::fmt::Debug + Copy, meta: &str, corner: Option<String>, cmd: Option<&Permission>, btns: &[Btn], pill: Rect, t: f64) -> (Rect, Option<usize>) {
+fn card(ui: &mut egui::Ui, core: &Core, s: &Session, key: impl Hash + std::fmt::Debug + Copy, meta: &str, corner: Option<String>, cmd: Option<&Permission>, btns: &[Btn], armed: bool, pill: Rect, t: f64) -> (Rect, Option<usize>) {
     let p = ui.painter().clone();
     let inner = CARD_W - 2.0 - 32.0;
     let corner = corner.map(|c| layout(&p, &[(&c, fmt(11.0, "geist", FG3))], inner, 1));
@@ -281,6 +281,10 @@ fn card(ui: &mut egui::Ui, core: &Core, s: &Session, key: impl Hash + std::fmt::
     let n = btns.len() as f32;
     let w = (inner - 8.0 * (n - 1.0)) / n;
     let mut clicked = None;
+    let mut p = p;
+    if !armed {
+        p.multiply_opacity(0.6);
+    }
     for (k, &(label, fill, color, border)) in btns.iter().enumerate() {
         let b = Rect::from_min_size(pos2(x + k as f32 * (w + 8.0), y), vec2(w, btn_h));
         let stroke = if border { Stroke::new(1.0, LINE) } else { Stroke::NONE };
@@ -300,25 +304,60 @@ pub fn btn_id(key: impl Hash + std::fmt::Debug, k: usize) -> Id {
     Id::unique(("btn", key, k))
 }
 
-/// Allow/Deny ignore clicks for 300 ms after a new request appears on the card (`since` is when it appeared).
-pub fn clickable(since: f64, now: f64) -> bool {
-    now - since >= 0.3
+/// Pointer history for the permission card showing `req`, so a click the user was already making
+/// where the card appeared can never answer it.
+#[derive(Clone, Copy, Debug)]
+pub struct Arming {
+    pub req: u64,
+    pub appeared: f64,
+    /// The cursor has been off the card since it appeared.
+    outside: bool,
+    /// The cursor came onto the card from outside after it appeared.
+    pub entered: bool,
+}
+
+impl Arming {
+    pub fn new(req: u64, appeared: f64, over: bool) -> Arming {
+        Arming { req, appeared, outside: !over, entered: false }
+    }
+
+    /// Feeds whether the cursor is over the card this frame.
+    pub fn update(&mut self, over: bool) {
+        if !over {
+            self.outside = true;
+        } else if self.outside {
+            self.entered = true;
+        }
+    }
+}
+
+/// Allow/Deny count a click only if the cursor entered the card after it appeared and the press began
+/// at least 600 ms after it appeared.
+pub fn armed(appeared: f64, press_started: f64, entered: bool) -> bool {
+    entered && press_started >= appeared + 0.6
+}
+
+/// Start time of the latest press: this frame if a button went down in it (press and release may share a
+/// frame), else egui's press start while held, else the previous value (egui clears it on release).
+pub fn press_time(prev: f64, pressed_now: bool, start: Option<f64>, now: f64) -> f64 {
+    if pressed_now { now } else { start.unwrap_or(prev) }
 }
 
 /// Permission card for `req_id` (spec 7.4). Returns its rect and the user's answer, if clicked this frame.
-pub fn permission_card(ui: &mut egui::Ui, core: &Core, req_id: u64, pill: Rect, t: f64) -> (Rect, Option<Reply>) {
+/// `armed` only dims the buttons; the caller decides whether a click counts.
+pub fn permission_card(ui: &mut egui::Ui, core: &Core, req_id: u64, armed: bool, pill: Rect, t: f64) -> (Rect, Option<Reply>) {
     let st = &core.state;
     let Some(perm) = st.permissions.iter().find(|p| p.req_id == req_id) else { return (Rect::NOTHING, None) };
     let Some(s) = st.sessions.iter().find(|s| s.id == perm.session_id) else { return (Rect::NOTHING, None) };
     let btns = [("Deny", BTN_BG, DENY, true), ("Allow", OK, ALLOW_FG, false)];
-    let (r, k) = card(ui, core, s, req_id, &perm.verb, of_n(&st.permissions), Some(perm), &btns, pill, t);
+    let (r, k) = card(ui, core, s, req_id, &perm.verb, of_n(&st.permissions), Some(perm), &btns, armed, pill, t);
     (r, k.map(|k| if k == 0 { Reply::Deny } else { Reply::Allow }))
 }
 
 /// Waiting card for session `id` (spec 7.5). Returns its rect and whether "Go to terminal" was clicked.
 pub fn waiting_card(ui: &mut egui::Ui, core: &Core, id: &str, pill: Rect, t: f64) -> (Rect, bool) {
     let Some(s) = core.state.sessions.iter().find(|s| s.id == id) else { return (Rect::NOTHING, false) };
-    let (r, k) = card(ui, core, s, id, waiting_text(s.status), None, None, &[("Go to terminal", BTN_BG, FG, true)], pill, t);
+    let (r, k) = card(ui, core, s, id, waiting_text(s.status), None, None, &[("Go to terminal", BTN_BG, FG, true)], true, pill, t);
     (r, k.is_some())
 }
 
@@ -582,11 +621,47 @@ mod tests {
     }
 
     #[test]
-    fn buttons_ignore_clicks_for_300ms_after_a_new_request() {
-        assert!(!clickable(10.0, 10.0));
-        assert!(!clickable(10.0, 10.29));
-        assert!(clickable(10.0, 10.3));
-        assert!(clickable(10.0, 60.0));
+    fn press_before_600ms_ignored() {
+        assert!(!armed(10.0, 10.0, true));
+        assert!(!armed(10.0, 10.59, true));
+    }
+
+    #[test]
+    fn press_after_600ms_with_entry_counts() {
+        let mut a = Arming::new(1, 10.0, false);
+        a.update(true);
+        assert!(a.entered);
+        assert!(armed(a.appeared, 10.6, a.entered));
+        assert!(!armed(a.appeared, 10.6, false), "no entry, no click");
+    }
+
+    #[test]
+    fn cursor_already_over_card_needs_leave_and_reenter() {
+        let mut a = Arming::new(1, 10.0, true);
+        a.update(true);
+        assert!(!a.entered, "still resting where the card appeared");
+        assert!(!armed(a.appeared, 12.0, a.entered));
+        a.update(false);
+        assert!(!a.entered, "left, not yet back");
+        a.update(true);
+        assert!(a.entered);
+        a.update(false);
+        assert!(a.entered, "stays armed once entered");
+        assert!(armed(a.appeared, 12.0, a.entered));
+    }
+
+    #[test]
+    fn release_late_but_press_early_ignored() {
+        let mut a = Arming::new(1, 10.0, false);
+        a.update(true);
+        // Pressed on the frame at 10.2, still held at 10.5, released on the frame at 11.0.
+        let p = press_time(f64::NEG_INFINITY, true, Some(10.2), 10.2);
+        let p = press_time(p, false, Some(10.2), 10.5);
+        let p = press_time(p, false, None, 11.0);
+        assert_eq!(p, 10.2);
+        assert!(!armed(a.appeared, p, a.entered));
+        // Press and release inside one frame: the press is this frame.
+        assert_eq!(press_time(10.2, true, None, 11.0), 11.0);
     }
 
     #[test]
