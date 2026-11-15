@@ -1,8 +1,15 @@
+mod blob;
+mod theme;
+mod views;
+
 use crate::server::Msg;
 use crate::{event, hook::Reply, procs, state::State};
+use eframe::egui::{self, Pos2, ViewportBuilder, ViewportCommand};
 use std::collections::HashMap;
-use std::sync::mpsc::Sender;
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
+use std::sync::mpsc::{Receiver, Sender};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use windows::Win32::Foundation::HWND;
 
 pub struct Core {
     pub state: State,
@@ -36,6 +43,7 @@ impl Core {
         }
     }
 
+    #[allow(dead_code)] // the permission card (Task 7) calls this
     pub fn answer(&mut self, req_id: u64, r: Reply) {
         if let Some(tx) = self.replies.remove(&req_id) {
             let _ = tx.send(r);
@@ -54,6 +62,133 @@ impl Core {
             return false;
         }
         now.duration_since(*self.empty_since.get_or_insert(now)) >= EXIT_AFTER_EMPTY
+    }
+}
+
+static CTX: OnceLock<egui::Context> = OnceLock::new();
+
+/// Runs the island until every session is gone. Returns at once if another island owns the pipe.
+pub fn run() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let wake = || {
+        if let Some(c) = CTX.get() {
+            c.request_repaint();
+        }
+    };
+    if crate::server::spawn(tx, wake).is_err() {
+        return;
+    }
+    let viewport = ViewportBuilder::default()
+        .with_title("Agent Islands")
+        .with_inner_size([400.0, 520.0])
+        .with_resizable(false)
+        .with_transparent(true)
+        .with_decorations(false)
+        .with_always_on_top()
+        .with_taskbar(false)
+        .with_active(false);
+    let options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, ..Default::default() };
+    let _ = eframe::run_native(
+        "agent-islands",
+        options,
+        Box::new(move |cc| {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            let RawWindowHandle::Win32(h) = cc.window_handle()?.as_raw() else { return Err("not win32".into()) };
+            let hwnd = HWND(h.hwnd.get() as *mut _);
+            win::place(hwnd);
+            theme::setup_fonts(&cc.egui_ctx);
+            let _ = CTX.set(cc.egui_ctx.clone());
+            Ok(Box::new(App { core: Core::new(), rx, hwnd, trimmed: false }))
+        }),
+    );
+}
+
+struct App {
+    core: Core,
+    rx: Receiver<Msg>,
+    hwnd: HWND,
+    trimmed: bool,
+}
+
+impl eframe::App for App {
+    fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+        while let Ok(msg) = self.rx.try_recv() {
+            self.core.handle(msg, now_ms);
+        }
+        let ctx = ui.ctx().clone();
+        if self.core.tick(Instant::now()) {
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return;
+        }
+        let t = ui.input(|i| i.time);
+        if !self.trimmed && t > 2.0 {
+            // The GL driver touches ~70 MB while starting up and never again; hand it back once.
+            self.trimmed = true;
+            win::trim();
+        }
+        let r = views::pill(ui, &self.core, t).rect;
+        // egui sees no hover while passthrough is on, so ask Windows where the cursor is.
+        let over = win::cursor(self.hwnd, ctx.pixels_per_point()).is_some_and(|p| views::hit(p, r));
+        win::sync_style(self.hwnd, !over);
+        let moving = self.core.state.sessions.iter().any(|s| matches!(s.status, crate::state::Status::Working | crate::state::Status::Waiting(_)));
+        ctx.request_repaint_after(Duration::from_millis(if moving { 33 } else { 100 }));
+    }
+}
+
+mod win {
+    use super::{Pos2, views::MARGIN};
+    use windows::Win32::Foundation::{HWND, POINT, RECT};
+    use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    use windows::Win32::UI::WindowsAndMessaging::*;
+
+    /// Top-left of the pill at (8, 96) logical px inside the primary monitor's work area.
+    pub fn place(hwnd: HWND) {
+        let mut work = RECT::default();
+        let (mut dpi, mut dpi_y) = (96u32, 96u32);
+        unsafe {
+            let _ = SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut work as *mut RECT as *mut _), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
+            let _ = GetDpiForMonitor(MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY), MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y);
+            let s = dpi as f32 / 96.0;
+            let (x, y) = (work.left + ((8.0 - MARGIN) * s).round() as i32, work.top + ((96.0 - MARGIN) * s).round() as i32);
+            let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+
+    pub fn trim() {
+        use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+        let _ = unsafe { SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX) };
+    }
+
+    /// Cursor in window-local logical px.
+    pub fn cursor(hwnd: HWND, ppp: f32) -> Option<Pos2> {
+        let (mut p, mut r) = (POINT::default(), RECT::default());
+        unsafe { GetCursorPos(&mut p).ok()?; GetWindowRect(hwnd, &mut r).ok()? };
+        Some(Pos2::new((p.x - r.left) as f32 / ppp, (p.y - r.top) as f32 / ppp))
+    }
+
+    /// Never activate, no taskbar or Alt+Tab entry, click-through when `passthrough`.
+    /// winit rewrites GWL_EXSTYLE whenever its own flags change (e.g. on first show), so this
+    /// runs every frame and owns passthrough instead of ViewportCommand::MousePassthrough.
+    pub fn sync_style(hwnd: HWND, passthrough: bool) {
+        let through = (WS_EX_TRANSPARENT | WS_EX_LAYERED).0 as isize;
+        unsafe {
+            let cur = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            let mut want = (cur | (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW).0 as isize) & !(WS_EX_APPWINDOW.0 as isize);
+            want = if passthrough { want | through } else { want & !through };
+            if want != cur {
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
+                if passthrough {
+                    // Without this a layered GL window composites see-through (text behind shows through the pill).
+                    let _ = SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 255, LWA_ALPHA);
+                }
+            }
+        }
     }
 }
 
