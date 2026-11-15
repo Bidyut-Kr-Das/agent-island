@@ -205,6 +205,20 @@ Step 1 (required): bring the Windows Terminal window that hosts the session to t
 
 Step 2 (best effort, behind a spike): select the right tab inside that window using Windows UI Automation, matching the tab title against what Claude Code sets as the terminal title (likely related to `session_title`). Before building it, run a throwaway spike to confirm: (a) how Windows Terminal's process tree links a tab to its shell, (b) what title Claude Code gives the tab, and (c) that UI Automation can select a tab by name. If the spike fails, ship step 1 only.
 
+## 9a. Command gate (added by the user on 2026-11-15)
+
+In Claude Code's auto mode, permission decisions go to Claude Code's own safety classifier, so no `PermissionRequest` fires and the island never sees them. The user wants a short list of risky commands to always come to the island for Allow/Deny, in every permission mode.
+
+- Mechanism: the `PreToolUse` hook for the shell tools (`Bash`, `PowerShell`) checks the command against the gate list inside the hook client. A command that does not match is forwarded as today and the hook returns at once. A matching command shows the same permission card as Section 7.4 (verb "Wants to run a gated command") and the hook waits for the click.
+- Output: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}` on Allow; `"permissionDecision":"deny","permissionDecisionReason":"Denied from Agent Islands"` on Deny.
+- No click within 30 seconds: deny, with reason `No answer in Agent Islands within 30 seconds`. Island unreachable or failed verification: deny, with reason `Agent Islands is not running`. Printing a deny without verification is safe; an allow still requires a verified island and a click.
+- Gate list (first version; the user will add more later and ship new versions). A command matches when any segment of it (split on `;`, `&&`, `||`, `|`, newlines) starts with one of these, compared case-insensitively on whole words:
+  - Deleting: `rm`, `rmdir`, `del`, `erase`, `rd`, `Remove-Item`, `ri`
+  - Git: `git commit`, `git push`, `git reset`
+  - Installing packages: `npm install`, `npm i`, `npm add`, `pnpm add`, `pnpm install`, `pnpm i`, `yarn add`, `yarn install`, `bun add`, `bun install`, `pip install`, `pip3 install`, `python -m pip install`, `uv add`, `uv pip install`, `cargo add`, `cargo install`
+- Not gated, by the user's choice: builds, type checks, tests, linting, and everything else.
+- The list is a constant in the code for now; a new version ships to change it.
+
 ## 10. Packaging and install
 
 - A Claude Code plugin folder containing `.claude-plugin/plugin.json`, `hooks/hooks.json`, and the built `agent-islands.exe`. Hook commands reference the exe through the plugin root variable, so the plugin works from any install path.
