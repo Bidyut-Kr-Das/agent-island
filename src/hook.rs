@@ -173,12 +173,12 @@ fn forward(name: &str, spawn: bool, event: Value, gated: bool) -> Option<String>
 
 pub fn run() -> i32 {
     let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_ok() {
-        if let Some(out) = run_with(&pipe::pipe_name(), true, &input) {
-            let mut so = std::io::stdout();
-            let _ = so.write_all(out.as_bytes());
-            let _ = so.flush();
-        }
+    if std::io::stdin().read_to_string(&mut input).is_ok()
+        && let Some(out) = run_with(&pipe::pipe_name(), true, &input)
+    {
+        let mut so = std::io::stdout();
+        let _ = so.write_all(out.as_bytes());
+        let _ = so.flush();
     }
     0
 }

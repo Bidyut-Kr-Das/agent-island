@@ -83,12 +83,12 @@ impl Server {
 
     pub fn accept(&mut self) -> io::Result<File> {
         let h = HANDLE(self.pending.as_raw_handle());
-        if let Err(e) = unsafe { ConnectNamedPipe(h, None) } {
-            if unsafe { GetLastError() } != ERROR_PIPE_CONNECTED {
-                // Broken instance (e.g. client closed early): replace it so the next accept works.
-                self.pending = create_instance(&self.name, false)?;
-                return Err(e.into());
-            }
+        if let Err(e) = unsafe { ConnectNamedPipe(h, None) }
+            && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED
+        {
+            // Broken instance (e.g. client closed early): replace it so the next accept works.
+            self.pending = create_instance(&self.name, false)?;
+            return Err(e.into());
         }
         let next = create_instance(&self.name, false)?;
         Ok(File::from(std::mem::replace(&mut self.pending, next)))
