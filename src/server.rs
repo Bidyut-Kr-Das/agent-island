@@ -1,6 +1,8 @@
 use crate::{hook::Reply, pipe::Server};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::time::Duration;
 
@@ -17,16 +19,16 @@ pub enum Msg {
     Replay { session_id: String, todos: Vec<crate::state::Todo> },
 }
 
-/// Fails if another island already owns the pipe.
-pub fn spawn(tx: Sender<Msg>, wake: impl Fn() + Send + Clone + 'static) -> std::io::Result<()> {
+/// Fails if another island already owns the pipe. While `paused` is set, gated commands skip the gate.
+pub fn spawn(tx: Sender<Msg>, wake: impl Fn() + Send + Clone + 'static, paused: Arc<AtomicBool>) -> std::io::Result<()> {
     let mut server = Server::create_first()?;
     std::thread::spawn(move || {
         loop {
             match server.accept() {
                 Ok(f) => {
-                    let (tx, wake) = (tx.clone(), wake.clone());
+                    let (tx, wake, paused) = (tx.clone(), wake.clone(), paused.clone());
                     std::thread::spawn(move || {
-                        let _ = serve(f, &tx, &wake);
+                        let _ = serve(f, &tx, &wake, &paused);
                     });
                 }
                 Err(_) => std::thread::sleep(Duration::from_millis(50)),
@@ -37,14 +39,20 @@ pub fn spawn(tx: Sender<Msg>, wake: impl Fn() + Send + Clone + 'static) -> std::
 }
 
 /// Any failure (bad JSON, broken pipe, dead receiver) just ends this connection thread.
-fn serve(f: std::fs::File, tx: &Sender<Msg>, wake: &impl Fn()) -> Option<()> {
+fn serve(f: std::fs::File, tx: &Sender<Msg>, wake: &impl Fn(), paused: &AtomicBool) -> Option<()> {
     let mut line = String::new();
     BufReader::new(&f).read_line(&mut line).ok()?;
     let mut v: Value = serde_json::from_str(&line).ok()?;
     let mut raw = v["event"].take();
     let chain = serde_json::from_value(v["chain"].take()).unwrap_or_default();
     // The hook ran the command gate (spec 9a); only its envelope flag counts, never a field in the event.
-    let gated = v["gated"] == true;
+    let mut gated = v["gated"] == true;
+    // Gating paused: the hook stays silent at once and the command is plain activity, no card.
+    if gated && paused.load(Ordering::Relaxed) {
+        (&f).write_all(b"{\"decision\":\"skip\"}
+").ok()?;
+        gated = false;
+    }
     if let Some(o) = raw.as_object_mut() {
         o.insert("gated".into(), gated.into());
     }
@@ -89,12 +97,16 @@ mod tests {
 
     /// Sends one envelope line through a real pipe to `serve` and returns what it hands the core.
     fn send(tag: &str, envelope: Value) -> (Msg, std::fs::File) {
+        send_paused(tag, envelope, false)
+    }
+
+    fn send_paused(tag: &str, envelope: Value, paused: bool) -> (Msg, std::fs::File) {
         let name = format!(r"\\.\pipe\ai-test-srv-{tag}-{}", std::process::id());
         let mut server = Server::create_first_named(&name).unwrap();
         let (tx, rx): (Sender<Msg>, Receiver<Msg>) = channel();
         std::thread::spawn(move || {
             let f = server.accept().unwrap();
-            let _ = serve(f, &tx, &|| {});
+            let _ = serve(f, &tx, &|| {}, &AtomicBool::new(paused));
         });
         let (mut c, _) = crate::pipe::connect_to(&name).unwrap();
         c.write_all(format!("{envelope}\n").as_bytes()).unwrap();
@@ -152,5 +164,16 @@ mod tests {
         let Msg::Event { raw, reply, .. } = msg else { panic!() };
         assert!(reply.is_none());
         assert_ne!(raw["gated"], true, "only the hook's envelope flag may gate");
+    }
+
+    #[test]
+    fn paused_gated_replies_skip_and_does_not_wait() {
+        let ev = serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": "PowerShell"});
+        let (msg, c) = send_paused("paused", serde_json::json!({"event": ev, "chain": [], "gated": true}), true);
+        let Msg::Event { raw, reply, .. } = msg else { panic!() };
+        assert!(reply.is_none());
+        assert_eq!(raw["gated"], false);
+        assert_eq!(read_all(c), "{\"decision\":\"skip\"}
+");
     }
 }

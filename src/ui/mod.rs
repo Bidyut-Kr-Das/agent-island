@@ -11,6 +11,8 @@ use crate::{event, hook::Reply, procs, state::State};
 use eframe::egui::{self, Pos2, ViewportBuilder, ViewportCommand};
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::Win32::Foundation::HWND;
@@ -108,7 +110,9 @@ pub fn run() {
             c.request_repaint();
         }
     };
-    if crate::server::spawn(tx.clone(), wake).is_err() {
+    // Gating pause lives in memory only: every island start gates.
+    let paused = Arc::new(AtomicBool::new(false));
+    if crate::server::spawn(tx.clone(), wake, paused.clone()).is_err() {
         return;
     }
     let viewport = ViewportBuilder::default()
@@ -140,7 +144,7 @@ pub fn run() {
             #[cfg(not(debug_assertions))]
             let open_req = None;
             let app = App {
-                core: Core::new(tx.clone()), rx, hwnd, region: Vec::new(), trimmed: false, selected: None, open_req, was_down: false, side, settings_open: false, arming: None, press_at: f64::NEG_INFINITY,
+                core: Core::new(tx.clone()), rx, hwnd, region: Vec::new(), trimmed: false, selected: None, open_req, was_down: false, side, settings_open: false, paused, arming: None, press_at: f64::NEG_INFINITY,
                 // Test hook, debug builds only: AGENT_ISLANDS_CLICK=allow|deny answers the first permission card 1 s after it shows.
                 #[cfg(debug_assertions)]
                 auto_click: parse_click(std::env::var("AGENT_ISLANDS_CLICK").ok().as_deref()),
@@ -170,6 +174,8 @@ struct App {
     was_down: bool,
     side: Side,
     settings_open: bool,
+    /// Shared with the pipe server: gated commands skip the gate while set.
+    paused: Arc<AtomicBool>,
     /// Pointer history for the permission card on screen.
     arming: Option<views::Arming>,
     /// When the latest mouse press started (egui time).
@@ -218,7 +224,7 @@ impl eframe::App for App {
             View::Waiting(id) => Some(id.clone()),
             _ => self.selected.clone(),
         };
-        let pill = views::pill(ui, &self.core, marked.as_deref(), self.side, t);
+        let pill = views::pill(ui, &self.core, marked.as_deref(), self.side, self.paused.load(Ordering::Relaxed), t);
         if pill.secondary_clicked() {
             self.settings_open = !self.settings_open;
         }
@@ -270,7 +276,10 @@ impl eframe::App for App {
                 (rect, 8.0)
             }
             View::Panel | View::Pill if self.settings_open => {
-                let (rect, clicked) = views::settings_card(ui, r, self.side);
+                let (rect, clicked, gate) = views::settings_card(ui, r, self.side, self.paused.load(Ordering::Relaxed));
+                if let Some(v) = gate {
+                    self.paused.store(v, Ordering::Relaxed);
+                }
                 if let Some(side) = clicked {
                     if let Some(p) = settings::path() {
                         let _ = settings::save_to(&p, side);

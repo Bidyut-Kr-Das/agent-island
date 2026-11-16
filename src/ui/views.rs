@@ -56,7 +56,8 @@ pub fn hit(p: Pos2, r: Rect) -> bool {
     p.distance(Pos2::new(r.center().x, y)) <= rad
 }
 
-pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, t: f64) -> egui::Response {
+/// `paused`: gating is paused, the outline turns amber so the user sees the gate is off.
+pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, paused: bool, t: f64) -> egui::Response {
     let h = ui.ctx().animate_value_with_time(Id::unique("pill_h"), pill_height(core.state.sessions.len()), 0.25);
     let r = Rect::from_min_size(pos2(pill_x(side), MARGIN), vec2(PILL_W, h));
     let resp = ui.allocate_rect(r, Sense::click());
@@ -66,7 +67,8 @@ pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, 
     let p = ui.painter();
     let rad = PILL_W / 2.0;
     p.add(Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(115) }.as_shape(r, rad));
-    p.rect(r, rad, BG, Stroke::new(1.0, LINE), StrokeKind::Inside);
+    let edge = if paused { Stroke::new(1.5, WARN) } else { Stroke::new(1.0, LINE) };
+    p.rect(r, rad, BG, edge, StrokeKind::Inside);
     let clip = p.with_clip_rect(r.shrink(1.0));
     for (i, s) in core.state.sessions.iter().enumerate() {
         let bottom = r.top() + 1.0 + PAD_Y + (i + 1) as f32 * BLOB + i as f32 * GAP;
@@ -556,32 +558,39 @@ pub fn label_rect(pill: Rect, i: usize, size: Vec2, side: Side) -> Rect {
     Rect::from_min_size(pos2(beside(pill, size.x, side), blob_top(pill, i) + BLOB / 2.0 - size.y / 2.0), size)
 }
 
-/// Settings card beside the pill, top-aligned with it: the title and a "Side" row of Left / Right buttons.
-/// Returns its rect and the side clicked this frame.
-pub fn settings_card(ui: &mut egui::Ui, pill: Rect, side: Side) -> (Rect, Option<Side>) {
+/// Settings card beside the pill, top-aligned with it: the title, a "Side" row of Left / Right buttons
+/// and a "Gating" row of On / Paused buttons. Returns its rect, the side and the paused value clicked this frame.
+pub fn settings_card(ui: &mut egui::Ui, pill: Rect, side: Side, paused: bool) -> (Rect, Option<Side>, Option<bool>) {
     let p = ui.painter().clone();
-    let h = 15.0 + 20.0 + 12.0 + 28.0 + 15.0;
+    let h = 15.0 + 20.0 + 12.0 + 28.0 + 12.0 + 28.0 + 15.0;
     let r = Rect::from_min_size(pos2(beside(pill, CARD_W, side), pill.top().min(WIN_H - MARGIN - h).max(MARGIN)), vec2(CARD_W, h));
     p.add(Shadow { offset: [0, 12], blur: 32, spread: 0, color: Color32::from_black_alpha(128) }.as_shape(r, 8.0));
     p.rect(r, 8.0, BG, Stroke::new(1.0, LINE), StrokeKind::Inside);
     let (x, mut y) = (r.left() + 17.0, r.top() + 15.0);
     let title = layout(&p, &[("Settings", fmt(14.0, "geist", FG))], f32::INFINITY, 1);
     p.galley(pos2(x, y + 10.0 - title.size().y / 2.0), title, FG);
-    y += 20.0 + 12.0;
-    let label = layout(&p, &[("Side", fmt(12.5, "geist", FG2))], f32::INFINITY, 1);
-    p.galley(pos2(x, y + 14.0 - label.size().y / 2.0), label, FG2);
-    let mut clicked = None;
-    for (k, (name, s)) in [("Left", Side::Left), ("Right", Side::Right)].into_iter().enumerate() {
-        let b = Rect::from_min_size(pos2(r.right() - 17.0 - 136.0 + k as f32 * 72.0, y), vec2(64.0, 28.0));
-        let fill = if s == side { Color32::from_white_alpha(26) } else { BTN_BG };
-        p.rect(b, 4.0, fill, Stroke::new(1.0, LINE), StrokeKind::Inside);
-        let g = layout(&p, &[(name, fmt(12.5, "geist", FG))], 64.0, 1);
-        p.galley(b.center() - g.size() / 2.0, g, FG);
-        if ui.interact(b, Id::unique(("side", name)), Sense::click()).clicked() {
-            clicked = Some(s);
+    // One row: a label and two buttons; returns the index clicked.
+    let row = |y: f32, label: &str, names: [&str; 2], on: usize| {
+        let g = layout(&p, &[(label, fmt(12.5, "geist", FG2))], f32::INFINITY, 1);
+        p.galley(pos2(x, y + 14.0 - g.size().y / 2.0), g, FG2);
+        let mut clicked = None;
+        for (k, name) in names.into_iter().enumerate() {
+            let b = Rect::from_min_size(pos2(r.right() - 17.0 - 136.0 + k as f32 * 72.0, y), vec2(64.0, 28.0));
+            let fill = if k == on { Color32::from_white_alpha(26) } else { BTN_BG };
+            p.rect(b, 4.0, fill, Stroke::new(1.0, LINE), StrokeKind::Inside);
+            let g = layout(&p, &[(name, fmt(12.5, "geist", FG))], 64.0, 1);
+            p.galley(b.center() - g.size() / 2.0, g, FG);
+            if ui.interact(b, Id::unique((label, name)), Sense::click()).clicked() {
+                clicked = Some(k);
+            }
         }
-    }
-    (r, clicked)
+        clicked
+    };
+    y += 20.0 + 12.0;
+    let side_click = row(y, "Side", ["Left", "Right"], usize::from(side == Side::Right));
+    y += 28.0 + 12.0;
+    let gate_click = row(y, "Gating", ["On", "Paused"], usize::from(paused));
+    (r, side_click.map(|k| if k == 0 { Side::Left } else { Side::Right }), gate_click.map(|k| k == 1))
 }
 
 #[cfg(test)]

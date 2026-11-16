@@ -218,6 +218,7 @@ In Claude Code's auto mode, permission decisions go to Claude Code's own safety 
   - Installing packages: `npm install`, `npm i`, `npm add`, `pnpm add`, `pnpm install`, `pnpm i`, `yarn add`, `yarn install`, `bun add`, `bun install`, `pip install`, `pip3 install`, `python -m pip install`, `uv add`, `uv pip install`, `cargo add`, `cargo install`
 - Not gated, by the user's choice: builds, type checks, tests, linting, and everything else.
 - The list is a constant in the code for now; a new version ships to change it.
+- Pause (added 2026-11-16): Settings has a "Gating" row, On / Paused. While paused, the island answers a gated command with `{"decision":"skip"}` at once and the hook prints nothing, so Claude Code's own permission rules decide; Agent Islands never auto-allows. The command shows as plain activity, with no card. The pill outline turns amber while paused. The pause lives in memory only: every island start gates. An unreachable island still denies.
 
 ## 10. Packaging and install
 

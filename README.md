@@ -33,7 +33,7 @@ See every session at a glance, follow its todos, and answer permission prompts w
 - **Live todos.** The panel shows each session's todo list as Claude updates it. After an island restart, the list is rebuilt from the session transcript.
 - **Answer from the island.** Permission prompts open a card with Allow and Deny. With no answer within 30 seconds, the normal terminal prompt takes over.
 - **Go to terminal.** Questions and waiting sessions get a button that brings the right Windows Terminal window and tab to the front.
-- **Command gate.** Risky shell commands always ask on the island, even in auto mode: `rm`, `del`, `Remove-Item`, `git commit`, `git push`, `git reset`, and package installs (`npm`, `pnpm`, `yarn`, `bun`, `pip`, `uv`, `cargo`).
+- **Command gate.** Risky shell commands always ask on the island, even in auto mode: `rm`, `del`, `Remove-Item`, `git commit`, `git push`, `git reset`, and package installs (`npm`, `pnpm`, `yarn`, `bun`, `pip`, `uv`, `cargo`). Going AFK? Set **Gating: Paused** in Settings (right-click the pill): gated commands then follow Claude Code's own permission rules, and the pill outline turns amber until you resume or restart the island.
 - **Finished pill.** Shows sessions that stopped while you looked elsewhere. Click it to clear.
 - **Left or right.** Right-click the pill to dock the island on either side of the screen.
 - **Stays out of the way.** It never steals typing focus, clicks pass through its transparent areas, and it exits about 3 seconds after the last session ends.

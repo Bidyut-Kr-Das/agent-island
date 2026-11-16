@@ -102,7 +102,7 @@ fn connect_retry(name: &str, spawn: bool) -> Option<(std::fs::File, u32, bool)> 
     }
 }
 
-/// The island's decision: "allow", "deny", or "timeout" (gated requests only).
+/// The island's decision: "allow", "deny", or "timeout" / "skip" (gated requests only).
 fn read_reply(f: std::fs::File) -> Option<String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -163,6 +163,10 @@ fn forward(name: &str, spawn: bool, event: Value, gated: bool) -> Option<String>
     f.write_all(line.as_bytes()).ok()?;
     if gated {
         let d = read_reply(f);
+        // Gating paused in the island: print nothing, Claude Code's own permission rules decide.
+        if d.as_deref() == Some("skip") {
+            return Some(String::new());
+        }
         return Some(pretool_output(to_reply(d.as_deref()), verified, d.as_deref() == Some("timeout")));
     }
     if !wants_reply {
@@ -347,6 +351,14 @@ mod tests {
         let name = format!(r"\\.\pipe\ai-test-gtimeout-{}", std::process::id());
         let t = serve(&name, Some("{\"decision\":\"timeout\"}\n"));
         assert_eq!(run_with(&name, false, GATED), Some(want));
+        t.join().unwrap();
+    }
+
+    #[test]
+    fn gated_skip_prints_nothing() {
+        let name = format!(r"\\.\pipe\ai-test-gskip-{}", std::process::id());
+        let t = serve(&name, Some("{\"decision\":\"skip\"}\n"));
+        assert_eq!(run_with(&name, false, GATED).as_deref(), Some(""));
         t.join().unwrap();
     }
 
