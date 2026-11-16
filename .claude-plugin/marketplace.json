@@ -1,7 +1,11 @@
 {
-  "name": "agent-islands-local",
-  "owner": { "name": "local" },
+  "name": "agent-islands",
+  "owner": { "name": "Bidyut-Kr-Das" },
   "plugins": [
-    { "name": "agent-islands", "source": "./plugin", "description": "Dynamic-island overlay for Claude Code sessions" }
+    {
+      "name": "agent-islands",
+      "description": "Dynamic-island overlay for Claude Code sessions",
+      "source": { "source": "archive", "url": "https://github.com/Bidyut-Kr-Das/agent-island/releases/download/v0.1.9/agent-islands.zip" }
+    }
   ]
 }

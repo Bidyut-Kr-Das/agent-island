@@ -1,0 +1,78 @@
+# Push a tag vX.Y.Z to publish a release: builds the exe, packs the plugin, and uses the
+# CHANGELOG.md section "## [X.Y.Z]" as the release notes.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match plugin.json version
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          grep -q "\"version\": \"$v\"" plugin/.claude-plugin/plugin.json \
+            || { echo "::error::$GITHUB_REF_NAME does not match the version in plugin/.claude-plugin/plugin.json"; exit 1; }
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v h="## [$v]" '/^## /{p = index($0, h) == 1; next} p' CHANGELOG.md > notes.md
+          grep -q '[^[:space:]]' notes.md \
+            || { echo "::error::CHANGELOG.md has no '## [$v]' section"; exit 1; }
+          cat notes.md
+
+      - run: rustup update stable --no-self-update
+
+      # Pipe tests share named pipes and race when run in parallel.
+      - run: cargo test --release -- --test-threads=1
+
+      - run: cargo build --release
+
+      - name: Pack plugin
+        run: |
+          mkdir -p plugin/bin
+          cp target/release/agent-islands.exe plugin/bin/
+          (cd plugin && 7z a ../agent-islands.zip .)
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" agent-islands.zip target/release/agent-islands.exe \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
+
+      # Installs come from the release zip, pinned by URL and sha256, so main must point at the new one.
+      - name: Point marketplace at this release
+        run: |
+          sha=$(sha256sum agent-islands.zip | cut -d' ' -f1)
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/agent-islands.zip"
+          git fetch origin main
+          git checkout -B main origin/main
+          cat > .claude-plugin/marketplace.json <<EOF
+          {
+            "name": "agent-islands",
+            "owner": { "name": "Bidyut-Kr-Das" },
+            "plugins": [
+              {
+                "name": "agent-islands",
+                "description": "Dynamic-island overlay for Claude Code sessions",
+                "source": { "source": "archive", "url": "$url", "sha256": "$sha" }
+              }
+            ]
+          }
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore: marketplace points at $GITHUB_REF_NAME"
+          git push origin main

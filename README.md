@@ -53,31 +53,28 @@ See every session at a glance, follow its todos, and answer permission prompts w
 
 ## Install
 
-Needs Rust (stable) and Windows 10 or 11.
-
-```powershell
-powershell -File .\build-plugin.ps1
-```
-
-This builds the exe into `plugin\bin\`. Then, in Claude Code:
+Windows 10 or 11. In Claude Code:
 
 ```text
-/plugin marketplace add D:\projects\agent-islands
-/plugin install agent-islands@agent-islands-local
+/plugin marketplace add Bidyut-Kr-Das/agent-island
+/plugin install agent-islands@agent-islands
 ```
 
-Use this repo's path in the first command. Restart running Claude Code sessions. The plugin applies to every session, and the island starts itself on the first hook event.
+The plugin is the zip from the latest GitHub release, pinned by URL and sha256. Restart running Claude Code sessions. The plugin applies to every session, and the island starts itself on the first hook event.
 
-## Update after code changes
+To update: `/plugin marketplace update agent-islands`, then `/plugin update agent-islands@agent-islands` and `/reload-plugins`. To remove: `/plugin uninstall agent-islands@agent-islands`.
 
-1. Run `powershell -File .\build-plugin.ps1`.
-   - It stops any running island from `plugin\bin` or the plugin cache.
-   - It rebuilds, copies the exe, and bumps the patch version in `plugin\.claude-plugin\plugin.json`.
-   - Claude Code detects updates by version, so without the bump nothing updates.
-2. Run `claude plugin update agent-islands@agent-islands-local` in a shell. If it reports nothing new, first run `/plugin marketplace update agent-islands-local`.
-3. Restart Claude Code sessions, or run `/reload-plugins` in a running one. The island restarts on the next hook event.
+## Release
 
-To remove the plugin: `/plugin uninstall agent-islands@agent-islands-local`.
+1. Bump `version` in `plugin/.claude-plugin/plugin.json`.
+2. Add a `## [X.Y.Z]` section to `CHANGELOG.md`. It becomes the release notes.
+3. Commit, then push a tag: `git tag vX.Y.Z && git push origin main vX.Y.Z`.
+
+`.github/workflows/release.yml` checks that the tag matches `plugin.json`, runs the tests, builds the exe, publishes `agent-islands.zip` and the exe as a GitHub release, and commits the new URL and sha256 into `.claude-plugin/marketplace.json` on `main`.
+
+## Local build
+
+Needs Rust (stable). `powershell -File .\build-plugin.ps1` stops any running island, rebuilds, copies the exe into `plugin\bin\` and bumps the patch version. Try that build without the release with `claude --plugin-dir .\plugin`.
 
 ## Tech stack
 
@@ -88,7 +85,7 @@ To remove the plugin: `/plugin uninstall agent-islands@agent-islands-local`.
 | Windows | `windows` 0.62: named pipes, window regions, focus, process tree, DPI |
 | Data | `serde` + `serde_json` for hook events and transcripts |
 | Fonts | Geist and Geist Mono (OFL), embedded |
-| Packaging | Claude Code plugin with a local marketplace, built by `build-plugin.ps1` |
+| Packaging | Claude Code plugin, released as a zip by GitHub Actions |
 
 ## Project layout
 
