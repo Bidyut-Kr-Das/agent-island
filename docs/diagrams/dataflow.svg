@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 728 416" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="dataflow-title dataflow-desc" id="dataflow-root">
+      <title id="dataflow-title">Agent Islands data flow</title>
+      <desc id="dataflow-desc">Claude Code hook events pass through the hook client and a named pipe into the island's session state, which drives the overlay; the user's Allow or Deny returns through the hook client to Claude Code.</desc>
+      <defs>
+      <style>@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;family=Noto+Serif:ital@0;1&amp;family=Noto+Sans+KR:wght@400;500;600&amp;family=Noto+Serif+KR:wght@400&amp;family=Noto+Sans+TC:wght@400;500;600&amp;family=Noto+Serif+TC:wght@400&amp;display=swap');
+      #dataflow-root { color: #2d3142; font-family: 'Geist', system-ui, sans-serif; }
+      #dataflow-root .diagram-container { width: 100%; overflow-x: auto; }
+      @media print {
+#dataflow-root .diagram-container { overflow-x: visible; }
+}
+      #dataflow-root .step-number, #dataflow-root .step-label, #dataflow-root .lane-label, #dataflow-root .role-text, #dataflow-root .legend-label { font-family: 'Geist Mono', ui-monospace, monospace; text-anchor: middle; }
+      #dataflow-root .step-number { fill: #2d3142; font-size: 7px; font-weight: 600; }
+      #dataflow-root .step-label { fill: #4f5d75; font-size: 7px; font-weight: 500; letter-spacing: 0.12em; }
+      #dataflow-root .lane-label { fill: #4f5d75; font-size: 8px; font-weight: 500; letter-spacing: 0.14em; }
+      #dataflow-root .role-text { fill: #2d3142; font-size: 6px; font-weight: 600; }
+      #dataflow-root .node-title { fill: #2d3142; font: 600 9px 'Geist', system-ui, sans-serif; text-anchor: middle; }
+      #dataflow-root .node-sub { fill: #4f5d75; font: 400 6.5px 'Geist Mono', ui-monospace, monospace; text-anchor: middle; }
+      #dataflow-root .node-tool { fill: #5a6580; font: 400 6.5px 'Geist Mono', ui-monospace, monospace; text-anchor: middle; }
+      #dataflow-root .focal-text { fill: #bf4520; }
+      #dataflow-root .legend-label { fill: #4f5d75; font-size: 7px; font-weight: 500; letter-spacing: 0.12em; text-anchor: end; }
+      #dataflow-root .legend-text { fill: #4f5d75; font: 400 7px 'Geist', system-ui, sans-serif; }</style>
+        <style>
+          .step-number, .step-label, .lane-label, .role-text, .legend-label { font-family: 'Geist Mono', ui-monospace, monospace; text-anchor: middle; }
+          .step-number { fill: #2d3142; font-size: 7px; font-weight: 600; }
+          .step-label { fill: #4f5d75; font-size: 7px; font-weight: 500; letter-spacing: 0.12em; }
+          .lane-label { fill: #4f5d75; font-size: 8px; font-weight: 500; letter-spacing: 0.14em; }
+          .role-text { fill: #2d3142; font-size: 6px; font-weight: 600; }
+          .node-title { fill: #2d3142; font: 600 9px 'Geist', system-ui, sans-serif; text-anchor: middle; }
+          .node-sub { fill: #4f5d75; font: 400 6.5px 'Geist Mono', ui-monospace, monospace; text-anchor: middle; }
+          .node-tool { fill: #5a6580; font: 400 6.5px 'Geist Mono', ui-monospace, monospace; text-anchor: middle; }
+          .focal-text { fill: #bf4520; }
+          .legend-label { fill: #4f5d75; font-size: 7px; font-weight: 500; letter-spacing: 0.12em; text-anchor: end; }
+          .legend-text { fill: #4f5d75; font: 400 7px 'Geist', system-ui, sans-serif; }
+        </style>
+        <pattern id="dataflow-dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="11" cy="11" r="0.8" fill="#2d3142" fill-opacity="0.10"/></pattern>
+        <marker id="dataflow-arr-muted" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 Z" fill="#4f5d75"/></marker>
+        <marker id="dataflow-arr-accent" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 Z" fill="#bf4520"/></marker>
+        <marker id="dataflow-arr-link" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 Z" fill="#2e5aa8"/></marker>
+      </defs>
+      <rect width="728" height="416" fill="#f5f5f5"/>
+      <rect width="728" height="416" fill="url(#dataflow-dots)"/>
+      <rect x="0" y="36" width="728" height="80" fill="#2d3142" fill-opacity="0.018"/>
+      <rect x="0" y="196" width="728" height="80" fill="#2d3142" fill-opacity="0.018"/>
+
+      <!-- Header and lane structure -->
+      <line x1="0" y1="36" x2="728" y2="36" stroke="#2d3142" stroke-width="0.8" stroke-opacity="0.12"/>
+      <line x1="0" y1="116" x2="728" y2="116" stroke="#2d3142" stroke-width="0.8" stroke-opacity="0.12"/>
+      <line x1="0" y1="196" x2="728" y2="196" stroke="#2d3142" stroke-width="0.8" stroke-opacity="0.12"/>
+      <line x1="0" y1="276" x2="728" y2="276" stroke="#2d3142" stroke-width="0.8" stroke-opacity="0.12"/>
+      <line x1="0" y1="356" x2="728" y2="356" stroke="#2d3142" stroke-width="0.8" stroke-opacity="0.12"/>
+      <line x1="140" y1="36" x2="140" y2="356" stroke="#2d3142" stroke-width="0.8" stroke-opacity="0.12"/>
+
+      <g aria-label="Steps">
+        <rect x="180" y="6" width="32" height="16" rx="8" fill="#2d3142" fill-opacity="0.12"/><text x="196" y="14" class="step-number">01</text><text x="196" y="29" class="step-label">FIRE</text>
+        <rect x="292" y="6" width="32" height="16" rx="8" fill="#2d3142" fill-opacity="0.12"/><text x="308" y="14" class="step-number">02</text><text x="308" y="29" class="step-label">FORWARD</text>
+        <rect x="404" y="6" width="32" height="16" rx="8" fill="#bf4520" fill-opacity="0.20"/><text x="420" y="14" class="step-number focal-text">03</text><text x="420" y="29" class="step-label focal-text">TRACK</text>
+        <rect x="516" y="6" width="32" height="16" rx="8" fill="#2d3142" fill-opacity="0.12"/><text x="532" y="14" class="step-number">04</text><text x="532" y="29" class="step-label">SHOW</text>
+        <rect x="628" y="6" width="32" height="16" rx="8" fill="#2d3142" fill-opacity="0.12"/><text x="644" y="14" class="step-number">05</text><text x="644" y="29" class="step-label">ANSWER</text>
+      </g>
+
+      <g aria-label="Lanes">
+        <text x="70" y="72" class="lane-label">CLAUDE</text><text x="70" y="84" class="lane-label">CODE</text>
+        <text x="70" y="152" class="lane-label">HOOK</text><text x="70" y="164" class="lane-label">CLIENT</text>
+        <text x="70" y="232" class="lane-label">ISLAND</text><text x="70" y="244" class="lane-label">PROCESS</text>
+        <text x="70" y="312" class="lane-label">THE</text><text x="70" y="324" class="lane-label">USER</text>
+      </g>
+
+      <!-- Connectors first. Cross-lane paths use r=8 orthogonal elbows. -->
+      <path d="M246 76 H300 Q308 76 308 84 V124" fill="none" stroke="#4f5d75" marker-end="url(#dataflow-arr-muted)"/>
+      <path d="M358 156 H395 Q403 156 403 164 V204" fill="none" stroke="#bf4520" stroke-width="1.2" marker-end="url(#dataflow-arr-accent)"/>
+      <path d="M437 108 V204" fill="none" stroke="#4f5d75" stroke-dasharray="4,3" marker-end="url(#dataflow-arr-muted)"/>
+      <path d="M470 236 H482" fill="none" stroke="#4f5d75" marker-end="url(#dataflow-arr-muted)"/>
+      <path d="M582 236 H619 Q627 236 627 244 V284" fill="none" stroke="#4f5d75" marker-end="url(#dataflow-arr-muted)"/>
+      <path d="M661 284 V188" fill="none" stroke="#2e5aa8" marker-end="url(#dataflow-arr-link)"/>
+      <path d="M644 124 V108" fill="none" stroke="#2e5aa8" marker-end="url(#dataflow-arr-link)"/>
+      <rect x="362" y="136" width="28" height="12" rx="2" fill="#f5f5f5"/>
+      <text x="376" y="145" fill="#bf4520" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.06em">PIPE</text>
+
+      <!-- Claude Code: hook event -->
+      <rect x="146" y="44" width="100" height="64" rx="6" fill="#f5f5f5" stroke="#2d3142" stroke-opacity="0.25"/>
+      <rect x="150" y="48" width="18" height="10" rx="3" fill="#2d3142" fill-opacity="0.12"/><text x="159" y="55" class="role-text">CLD</text>
+      <text x="196" y="67" class="node-title">Hook Event</text><text x="196" y="79" class="node-sub">session · tool · stop</text><text x="196" y="91" class="node-tool">hooks.json</text>
+
+      <!-- Claude Code: transcript -->
+      <rect x="370" y="44" width="100" height="64" rx="6" fill="#f5f5f5" stroke="#2d3142" stroke-opacity="0.25"/>
+      <rect x="374" y="48" width="18" height="10" rx="3" fill="#2d3142" fill-opacity="0.12"/><text x="383" y="55" class="role-text">CLD</text>
+      <text x="420" y="67" class="node-title">Transcript</text><text x="420" y="79" class="node-sub">todos on first sight</text><text x="420" y="91" class="node-tool">transcript_path</text>
+
+      <!-- Claude Code: tool result -->
+      <rect x="594" y="44" width="100" height="64" rx="6" fill="#f5f5f5" stroke="#2d3142" stroke-opacity="0.25"/>
+      <rect x="598" y="48" width="18" height="10" rx="3" fill="#2d3142" fill-opacity="0.12"/><text x="607" y="55" class="role-text">CLD</text>
+      <text x="644" y="67" class="node-title">Tool Runs</text><text x="644" y="79" class="node-sub">or is denied</text><text x="644" y="91" class="node-tool">Claude Code</text>
+
+      <!-- Hook client: forward -->
+      <rect x="258" y="124" width="100" height="64" rx="6" fill="#f5f5f5" stroke="#2d3142" stroke-opacity="0.25"/>
+      <rect x="262" y="128" width="18" height="10" rx="3" fill="#2d3142" fill-opacity="0.12"/><text x="271" y="135" class="role-text">HOK</text>
+      <text x="308" y="147" class="node-title">Hook Client</text><text x="308" y="159" class="node-sub">stdin JSON → pipe</text><text x="308" y="171" class="node-tool">agent-islands.exe hook</text>
+
+      <!-- Hook client: decision -->
+      <rect x="594" y="124" width="100" height="64" rx="6" fill="#f5f5f5" stroke="#2d3142" stroke-opacity="0.25"/>
+      <rect x="598" y="128" width="18" height="10" rx="3" fill="#2d3142" fill-opacity="0.12"/><text x="607" y="135" class="role-text">HOK</text>
+      <text x="644" y="147" class="node-title">Decision</text><text x="644" y="159" class="node-sub">verified island only</text><text x="644" y="171" class="node-tool">stdout JSON</text>
+
+      <!-- Island: session state (focal) -->
+      <rect x="370" y="204" width="100" height="64" rx="6" fill="#bf4520" stroke="#bf4520" stroke-width="1.2" fill-opacity="0.07"/>
+      <rect x="374" y="208" width="18" height="10" rx="3" fill="#bf4520" fill-opacity="0.20"/><text x="383" y="215" class="role-text focal-text">ISL</text>
+      <text x="420" y="227" class="node-title">Session State</text><text x="420" y="239" class="node-sub">status · todos · cards</text><text x="420" y="251" class="node-tool">state.rs</text>
+
+      <!-- Island: overlay -->
+      <rect x="482" y="204" width="100" height="64" rx="6" fill="#f5f5f5" stroke="#2d3142" stroke-opacity="0.25"/>
+      <rect x="486" y="208" width="18" height="10" rx="3" fill="#2d3142" fill-opacity="0.12"/><text x="495" y="215" class="role-text">ISL</text>
+      <text x="532" y="227" class="node-title">Overlay</text><text x="532" y="239" class="node-sub">blobs · panel · cards</text><text x="532" y="251" class="node-tool">egui · Win32</text>
+
+      <!-- User: answer -->
+      <rect x="594" y="284" width="100" height="64" rx="6" fill="#f5f5f5" stroke="#2d3142" stroke-opacity="0.25"/>
+      <rect x="598" y="288" width="18" height="10" rx="3" fill="#2d3142" fill-opacity="0.12"/><text x="607" y="295" class="role-text">YOU</text>
+      <text x="644" y="307" class="node-title">Allow / Deny</text><text x="644" y="319" class="node-sub">or go to terminal</text><text x="644" y="331" class="node-tool">click on a card</text>
+
+      <!-- Legend: steps -->
+      <text x="164" y="375" class="legend-label">STEPS</text>
+      <rect x="180" y="366" width="24" height="12" rx="6" fill="#2d3142" fill-opacity="0.12"/><text x="192" y="374" class="step-number">01</text><text x="212" y="375" class="legend-text">Fire</text>
+      <rect x="264" y="366" width="24" height="12" rx="6" fill="#2d3142" fill-opacity="0.12"/><text x="276" y="374" class="step-number">02</text><text x="296" y="375" class="legend-text">Forward</text>
+      <rect x="360" y="366" width="24" height="12" rx="6" fill="#bf4520" fill-opacity="0.20"/><text x="372" y="374" class="step-number focal-text">03</text><text x="392" y="375" class="legend-text">Track</text>
+      <rect x="448" y="366" width="24" height="12" rx="6" fill="#2d3142" fill-opacity="0.12"/><text x="460" y="374" class="step-number">04</text><text x="480" y="375" class="legend-text">Show</text>
+      <rect x="532" y="366" width="24" height="12" rx="6" fill="#2d3142" fill-opacity="0.12"/><text x="544" y="374" class="step-number">05</text><text x="564" y="375" class="legend-text">Answer</text>
+
+      <!-- Legend: flow -->
+      <text x="164" y="397" class="legend-label">FLOW</text>
+      <line x1="180" y1="394" x2="204" y2="394" stroke="#4f5d75" marker-end="url(#dataflow-arr-muted)"/><text x="212" y="397" class="legend-text">Event handoff</text>
+      <line x1="292" y1="394" x2="316" y2="394" stroke="#bf4520" stroke-width="1.2" marker-end="url(#dataflow-arr-accent)"/><text x="324" y="397" class="legend-text">Named pipe</text>
+      <line x1="400" y1="394" x2="424" y2="394" stroke="#4f5d75" stroke-dasharray="4,3" marker-end="url(#dataflow-arr-muted)"/><text x="432" y="397" class="legend-text">Read once</text>
+      <line x1="500" y1="394" x2="524" y2="394" stroke="#2e5aa8" marker-end="url(#dataflow-arr-link)"/><text x="532" y="397" class="legend-text">Decision reply</text>
+    </svg>

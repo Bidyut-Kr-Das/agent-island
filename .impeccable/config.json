@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "tiny-text",
+        "value": "*",
+        "files": [
+          "docs/diagrams/dataflow.html"
+        ],
+        "createdAt": "2026-11-16T10:18:32.239Z",
+        "reason": "diagram-design skill data-flow spec: SVG viewBox text sizes scale with the rendered width"
+      }
+    ]
+  }
+}
