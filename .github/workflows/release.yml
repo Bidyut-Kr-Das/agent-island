@@ -34,8 +34,9 @@ jobs:
 
       - run: rustup update stable --no-self-update
 
+      # Debug build: the test pipe override (AGENT_ISLANDS_PIPE) exists only with debug_assertions.
       # Pipe tests share named pipes and race when run in parallel.
-      - run: cargo test --release -- --test-threads=1
+      - run: cargo test -- --test-threads=1
 
       - run: cargo build --release
 
