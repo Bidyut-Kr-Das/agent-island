@@ -286,9 +286,14 @@ mod tests {
         let (rtx, qtx) = reply.unwrap();
         qtx.send(1).unwrap();
         rtx.send(Reply::Rearm).unwrap();
-        let h = std::thread::spawn(move || read_all(c));
+        let (otx, orx) = channel();
+        std::thread::spawn(move || {
+            let _ = otx.send(read_all(c));
+        });
         std::thread::sleep(Duration::from_secs(1));
-        assert!(!h.is_finished(), "no reply within 1 s of the rearm");
-        assert_eq!(h.join().unwrap(), "{\"decision\":\"timeout\"}\n");
+        assert!(orx.try_recv().is_err(), "no reply within 1 s of the rearm");
+        // Well under the 60 s away window: ignoring Rearm would fail here.
+        let got = orx.recv_timeout(Duration::from_secs(5)).expect("timeout reply after the rearm window");
+        assert_eq!(got, "{\"decision\":\"timeout\"}\n");
     }
 }
