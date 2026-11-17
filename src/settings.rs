@@ -22,12 +22,29 @@ pub fn load_from(path: &Path) -> Side {
     }
 }
 
-pub fn save_to(path: &Path, side: Side) -> std::io::Result<()> {
+/// Anything missing or unreadable is None.
+pub fn load_chat(path: &Path) -> Option<i64> {
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    v["phone_chat"].as_i64()
+}
+
+/// Replaces one key and keeps the rest. Unreadable or non-object content starts from `{}`.
+pub fn set(path: &Path, key: &str, value: serde_json::Value) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
+    let mut v: serde_json::Value = std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .filter(|v: &serde_json::Value| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
+    v[key] = value;
+    std::fs::write(path, v.to_string())
+}
+
+pub fn save_to(path: &Path, side: Side) -> std::io::Result<()> {
     let s = if side == Side::Right { "right" } else { "left" };
-    std::fs::write(path, serde_json::json!({ "side": s }).to_string())
+    set(path, "side", serde_json::json!(s))
 }
 
 #[cfg(test)]
@@ -60,5 +77,26 @@ mod tests {
             std::fs::write(&p, g).unwrap();
             assert_eq!(load_from(&p), Side::Left, "{g}");
         }
+    }
+
+    #[test]
+    fn set_keeps_other_keys() {
+        let p = tmp("rmw");
+        save_to(&p, Side::Right).unwrap();
+        set(&p, "phone_chat", serde_json::json!(42)).unwrap();
+        assert_eq!((load_from(&p), load_chat(&p)), (Side::Right, Some(42)));
+        save_to(&p, Side::Left).unwrap();
+        assert_eq!(load_chat(&p), Some(42));
+        set(&p, "phone_chat", serde_json::Value::Null).unwrap();
+        assert_eq!(load_chat(&p), None);
+    }
+
+    #[test]
+    fn set_over_garbage_starts_fresh() {
+        let p = tmp("rmwg");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "not json").unwrap();
+        set(&p, "phone_chat", serde_json::json!(7)).unwrap();
+        assert_eq!(load_chat(&p), Some(7));
     }
 }
