@@ -36,6 +36,7 @@ See every session at a glance, follow its todos, and answer permission prompts w
 - **Command gate.** Risky shell commands always ask on the island, even in auto mode: `rm`, `del`, `Remove-Item`, `git commit`, `git push`, `git reset`, and package installs (`npm`, `pnpm`, `yarn`, `bun`, `pip`, `uv`, `cargo`). Going AFK? Set **Gating: Paused** in Settings (right-click the pill): gated commands then follow Claude Code's own permission rules, and the pill outline turns amber until you resume or restart the island.
 - **Finished pill.** Shows sessions that stopped while you looked elsewhere. Click it to clear.
 - **Left or right.** Right-click the pill to dock the island on either side of the screen.
+- **Phone link (optional).** Get each session's events on Telegram and reply from your phone. Off until you set a bot token. See [Phone link](#phone-link).
 - **Stays out of the way.** It never steals typing focus, clicks pass through its transparent areas, and it exits about 3 seconds after the last session ends.
 
 ## How it works
@@ -63,6 +64,41 @@ Windows 10 or 11. In Claude Code:
 The plugin is the zip from the latest GitHub release, pinned by URL and sha256. Restart running Claude Code sessions. The plugin applies to every session, and the island starts itself on the first hook event.
 
 To update: `/plugin marketplace update agent-islands`, then `/plugin update agent-islands@agent-islands` and `/reload-plugins`. To remove: `/plugin uninstall agent-islands@agent-islands`.
+
+## Phone link
+
+The phone link is optional and off by default. Nothing talks to Telegram until you set a bot token.
+
+Setup:
+
+1. In Telegram, create a bot with [@BotFather](https://t.me/BotFather) and copy its token.
+2. In Claude Code, run `/plugin`, pick agent-islands, choose configure, and paste the token into **Telegram bot token**.
+3. Open a session and click its blob on the island. The panel shows `Phone: send <code> to @<bot>`. Send that 6-digit code to your bot. It answers `Paired`. The code changes after 5 wrong tries or 10 minutes.
+
+What arrives on the phone is one new message per event. The first line is a color circle and the session name, followed by one of:
+
+- **Started.**
+- `You (PC): <prompt>` when you send a prompt at the PC.
+- `Permission: ...` with Allow and Deny buttons.
+- The final answer and todo list, when Claude stops.
+- `Error: ...`
+- `Waiting for you: ...`
+- **Ended.**
+
+Tool calls are not sent.
+
+Replies:
+
+- Reply to a session's message to send your text to that session as a prompt.
+- A message that is not a reply goes to the only open session. If more than one is open, the bot asks `Which session?`.
+- If the session is busy, your reply runs after the current turn, and the bot says `Queued: <name> is busy`.
+- Messages sent while no session is open are not delivered. The bot says so once.
+- Permission cards still time out after 30 seconds. When you are away, pause gating from the island's right-click settings (see Command gate above).
+- For voice, use your phone keyboard's dictation.
+
+Messages pass through Telegram's servers.
+
+Disconnect: right-click the island, choose the **Phone** row, then **Disconnect**. Removing the token in `/plugin` turns the feature off.
 
 ## Release
 

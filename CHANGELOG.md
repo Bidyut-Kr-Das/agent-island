@@ -2,6 +2,14 @@
 
 Each `## [x.y.z]` section is the release note for tag `vx.y.z`. The release workflow publishes the section that matches the pushed tag, so write the section before you tag.
 
+## [Unreleased]
+
+### Added
+- Telegram phone link. Optional and off until a bot token is set.
+
+### Fixed
+- The island no longer drops a hook event when the hook closed its connection before the island accepted it.
+
 ## [0.1.9] - 2026-11-16
 
 ### Added
