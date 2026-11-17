@@ -70,7 +70,7 @@ impl Core {
                 let s = ended.or_else(|| self.state.sessions.iter().find(|s| s.id == ev.session_id).cloned());
                 // A held question: the server only sends `reply` for it while away. It gets no card and
                 // no "Waiting for you" message; the question message replaces it.
-                let questions = (reply.is_some() && ev.name == "PreToolUse" && ev.tool_name.as_deref() == Some("AskUserQuestion"))
+                let questions = (reply.is_some() && self.phone.away.load(Ordering::Relaxed) && ev.name == "PreToolUse" && ev.tool_name.as_deref() == Some("AskUserQuestion"))
                     .then(|| ev.tool_input["questions"].as_array().cloned())
                     .flatten()
                     .filter(|q| !q.is_empty());
@@ -862,6 +862,21 @@ Q?"), "{text}");
         assert_eq!(c.phone.ask_msgs.get(&9), Some(&(id, 0)));
         c.answer(id, Reply::Answer(json!({"Q?": "B"})));
         assert!(matches!(rx.try_recv(), Ok(Reply::Answer(a)) if a == json!({"Q?": "B"})));
+    }
+
+    #[test]
+    fn ask_arriving_after_away_off_is_not_held() {
+        let (mut c, orx) = away_core();
+        c.set_away(false);
+        let mut r = raw("PreToolUse", "s");
+        r["tool_name"] = json!("AskUserQuestion");
+        r["tool_input"] = json!({"questions": [{"question": "Q?", "options": [{"label": "A"}]}]});
+        let (rtx, rrx) = channel();
+        let (qtx, qrx) = channel();
+        c.handle(Msg::Event { raw: r, chain: vec![], reply: Some((rtx, qtx)), token: None }, 1);
+        assert!(matches!(rrx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)));
+        assert!(qrx.try_recv().is_err() && c.phone.asks.is_empty() && c.replies.is_empty());
+        assert!(orx.try_recv().is_err(), "nothing sent to Telegram");
     }
 
     #[test]
