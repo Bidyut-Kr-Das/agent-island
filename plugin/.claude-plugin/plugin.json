@@ -1,5 +1,14 @@
 {
   "name": "agent-islands",
   "version": "0.1.9",
-  "description": "Dynamic-island style overlay showing Claude Code session status, permissions and questions"
+  "description": "Dynamic-island style overlay showing Claude Code session status, permissions and questions",
+  "userConfig": {
+    "telegram_bot_token": {
+      "type": "string",
+      "title": "Telegram bot token",
+      "description": "Optional. Lets you follow and answer sessions from Telegram. Leave blank to keep it off.",
+      "sensitive": true,
+      "required": false
+    }
+  }
 }
