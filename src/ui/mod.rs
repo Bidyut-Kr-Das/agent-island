@@ -5,6 +5,7 @@ mod views;
 use blob::BlobState;
 use views::View;
 
+use crate::phone::PhoneStatus;
 use crate::server::Msg;
 use crate::settings::{self, Side};
 use crate::{event, hook::Reply, procs, state::State};
@@ -200,6 +201,9 @@ pub fn run() {
             win::no_frame(hwnd);
             let side = settings::path().map(|p| settings::load_from(&p)).unwrap_or_default();
             win::place(hwnd, side);
+            let mut core = Core::new(tx.clone());
+            core.phone.chat.store(settings::path().and_then(|p| settings::load_chat(&p)).unwrap_or(0), Ordering::Relaxed);
+            core.phone.settings = settings::path();
             theme::setup_fonts(&cc.egui_ctx);
             let _ = CTX.set(cc.egui_ctx.clone());
             // Test hook, debug builds only: AGENT_ISLANDS_OPEN=<session id> opens the panel on that session once it exists.
@@ -208,7 +212,7 @@ pub fn run() {
             #[cfg(not(debug_assertions))]
             let open_req = None;
             let app = App {
-                core: Core::new(tx.clone()), rx, hwnd, region: Vec::new(), trimmed: false, selected: None, open_req, was_down: false, side, settings_open: false, paused, arming: None, press_at: f64::NEG_INFINITY,
+                core, rx, hwnd, region: Vec::new(), trimmed: false, selected: None, open_req, was_down: false, side, settings_open: false, paused, arming: None, press_at: f64::NEG_INFINITY,
                 // Test hook, debug builds only: AGENT_ISLANDS_CLICK=allow|deny answers the first permission card 1 s after it shows.
                 #[cfg(debug_assertions)]
                 auto_click: parse_click(std::env::var("AGENT_ISLANDS_CLICK").ok().as_deref()),
@@ -281,6 +285,7 @@ impl eframe::App for App {
         if let Some(id) = self.open_req.take_if(|id| sessions.iter().any(|s| &s.id == id)) {
             self.selected = Some(id);
         }
+        let phone = self.core.phone.status(Instant::now());
         let view = views::current_view(&self.core, self.selected.is_some());
         // The bar marks the session a card is about (island-left.html state 3), else the selection.
         let marked = match &view {
@@ -340,9 +345,12 @@ impl eframe::App for App {
                 (rect, 8.0)
             }
             View::Panel | View::Pill if self.settings_open => {
-                let (rect, clicked, gate) = views::settings_card(ui, r, self.side, self.paused.load(Ordering::Relaxed));
+                let (rect, clicked, gate, disconnect) = views::settings_card(ui, r, self.side, self.paused.load(Ordering::Relaxed), matches!(phone, PhoneStatus::Paired));
                 if let Some(v) = gate {
                     self.paused.store(v, Ordering::Relaxed);
+                }
+                if disconnect {
+                    self.core.phone.disconnect();
                 }
                 if let Some(side) = clicked {
                     if let Some(p) = settings::path() {
@@ -354,7 +362,7 @@ impl eframe::App for App {
                 (rect, 8.0)
             }
             View::Panel | View::Pill => {
-                let (panel, go) = views::panel(ui, &self.core, &mut self.selected, r, self.side, t);
+                let (panel, go) = views::panel(ui, &self.core, &phone, &mut self.selected, r, self.side, t);
                 if go && let Some(s) = self.selected.as_deref().and_then(|id| self.core.state.sessions.iter().find(|s| s.id == id)) {
                     go_to_terminal(s);
                 }

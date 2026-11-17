@@ -1,4 +1,5 @@
 use super::Core;
+use crate::phone::PhoneStatus;
 use crate::settings::Side;
 use crate::state::{Finish, Permission, Session, Todo, TodoStatus, WaitKind};
 use std::collections::VecDeque;
@@ -87,7 +88,7 @@ pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, 
 /// The expanded panel for the selected session, beside `pill`. Closes (sets `selected` to None) when that
 /// session is gone. Returns the panel's current on-screen rect (`Rect::NOTHING` when fully closed) and
 /// whether "Go to terminal" was clicked.
-pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill: Rect, side: Side, t: f64) -> (Rect, bool) {
+pub fn panel(ui: &mut egui::Ui, core: &Core, phone: &PhoneStatus, selected: &mut Option<String>, pill: Rect, side: Side, t: f64) -> (Rect, bool) {
     let find = |id: &str| core.state.sessions.iter().find(|s| s.id == id);
     if selected.as_deref().is_some_and(|id| find(id).is_none()) {
         *selected = None;
@@ -110,7 +111,7 @@ pub fn panel(ui: &mut egui::Ui, core: &Core, selected: &mut Option<String>, pill
     let parent = text(&s.parent, 12.0, "geist", FG3, f32::INFINITY);
     let row = title_row(if s.parent.is_empty() { 0.0 } else { parent.size().x }, name.size().x, TITLE_AVAIL);
     let title_h = name.size().y;
-    let rows: Vec<_> = panel_rows(s)
+    let rows: Vec<_> = panel_rows(s, phone)
         .into_iter()
         .map(|(icon, label)| {
             let g = match icon {
@@ -179,7 +180,7 @@ pub enum RowIcon {
 }
 
 /// Panel rows: the session's todos (completed, in progress); in progress only spins while working.
-pub fn panel_rows(s: &Session) -> Vec<(RowIcon, String)> {
+pub fn panel_rows(s: &Session, phone: &PhoneStatus) -> Vec<(RowIcon, String)> {
     let working = s.status == Status::Working;
     let mut rows: Vec<_> = visible_todos(&s.todos)
         .into_iter()
@@ -198,6 +199,10 @@ pub fn panel_rows(s: &Session) -> Vec<(RowIcon, String)> {
             Status::Idle => rows.push((RowIcon::None, "No tasks recorded".into())),
             Status::Waiting(_) => {}
         }
+    }
+    if let PhoneStatus::Pairing { code, bot } = phone {
+        let to = bot.as_ref().map_or("your bot".to_string(), |b| format!("@{b}"));
+        rows.push((RowIcon::None, format!("Phone: send {code} to {to}")));
     }
     rows
 }
@@ -558,11 +563,15 @@ pub fn label_rect(pill: Rect, i: usize, size: Vec2, side: Side) -> Rect {
     Rect::from_min_size(pos2(beside(pill, size.x, side), blob_top(pill, i) + BLOB / 2.0 - size.y / 2.0), size)
 }
 
+fn settings_h(paired: bool) -> f32 {
+    15.0 + 20.0 + 12.0 + 28.0 + 12.0 + 28.0 + 15.0 + if paired { 12.0 + 28.0 } else { 0.0 }
+}
+
 /// Settings card beside the pill, top-aligned with it: the title, a "Side" row of Left / Right buttons
 /// and a "Gating" row of On / Paused buttons. Returns its rect, the side and the paused value clicked this frame.
-pub fn settings_card(ui: &mut egui::Ui, pill: Rect, side: Side, paused: bool) -> (Rect, Option<Side>, Option<bool>) {
+pub fn settings_card(ui: &mut egui::Ui, pill: Rect, side: Side, paused: bool, paired: bool) -> (Rect, Option<Side>, Option<bool>, bool) {
     let p = ui.painter().clone();
-    let h = 15.0 + 20.0 + 12.0 + 28.0 + 12.0 + 28.0 + 15.0;
+    let h = settings_h(paired);
     let r = Rect::from_min_size(pos2(beside(pill, CARD_W, side), pill.top().min(WIN_H - MARGIN - h).max(MARGIN)), vec2(CARD_W, h));
     p.add(Shadow { offset: [0, 12], blur: 32, spread: 0, color: Color32::from_black_alpha(128) }.as_shape(r, 8.0));
     p.rect(r, 8.0, BG, Stroke::new(1.0, LINE), StrokeKind::Inside);
@@ -570,27 +579,28 @@ pub fn settings_card(ui: &mut egui::Ui, pill: Rect, side: Side, paused: bool) ->
     let title = layout(&p, &[("Settings", fmt(14.0, "geist", FG))], f32::INFINITY, 1);
     p.galley(pos2(x, y + 10.0 - title.size().y / 2.0), title, FG);
     // One row: a label and two buttons; returns the index clicked.
-    let row = |y: f32, label: &str, names: [&str; 2], on: usize| {
+    let row = |y: f32, label: &str, names: &[&str], on: usize| {
         let g = layout(&p, &[(label, fmt(12.5, "geist", FG2))], f32::INFINITY, 1);
         p.galley(pos2(x, y + 14.0 - g.size().y / 2.0), g, FG2);
         let mut clicked = None;
-        for (k, name) in names.into_iter().enumerate() {
+        for (k, name) in names.iter().enumerate() {
             let b = Rect::from_min_size(pos2(r.right() - 17.0 - 136.0 + k as f32 * 72.0, y), vec2(64.0, 28.0));
             let fill = if k == on { Color32::from_white_alpha(26) } else { BTN_BG };
             p.rect(b, 4.0, fill, Stroke::new(1.0, LINE), StrokeKind::Inside);
             let g = layout(&p, &[(name, fmt(12.5, "geist", FG))], 64.0, 1);
             p.galley(b.center() - g.size() / 2.0, g, FG);
-            if ui.interact(b, Id::unique((label, name)), Sense::click()).clicked() {
+            if ui.interact(b, Id::unique((label, *name)), Sense::click()).clicked() {
                 clicked = Some(k);
             }
         }
         clicked
     };
     y += 20.0 + 12.0;
-    let side_click = row(y, "Side", ["Left", "Right"], usize::from(side == Side::Right));
+    let side_click = row(y, "Side", &["Left", "Right"], usize::from(side == Side::Right));
     y += 28.0 + 12.0;
-    let gate_click = row(y, "Gating", ["On", "Paused"], usize::from(paused));
-    (r, side_click.map(|k| if k == 0 { Side::Left } else { Side::Right }), gate_click.map(|k| k == 1))
+    let gate_click = row(y, "Gating", &["On", "Paused"], usize::from(paused));
+    let disconnect = paired && row(y + 28.0 + 12.0, "Phone", &["Disconnect"], usize::MAX).is_some();
+    (r, side_click.map(|k| if k == 0 { Side::Left } else { Side::Right }), gate_click.map(|k| k == 1), disconnect)
 }
 
 #[cfg(test)]
@@ -641,6 +651,22 @@ mod tests {
         assert_eq!(ids, ["a", "c", "d"]);
     }
 
+    #[test]
+    fn pairing_line_only_while_pairing() {
+        let s = sess_with(Status::Idle, vec![]);
+        let pairing = |bot: Option<&str>| PhoneStatus::Pairing { code: "482913".into(), bot: bot.map(String::from) };
+        assert_eq!(panel_rows(&s, &pairing(Some("mybot"))).last().unwrap(), &(RowIcon::None, "Phone: send 482913 to @mybot".to_string()));
+        assert_eq!(panel_rows(&s, &pairing(None)).last().unwrap(), &(RowIcon::None, "Phone: send 482913 to your bot".to_string()));
+        assert_eq!(panel_rows(&s, &PhoneStatus::Off).len(), 1);
+        assert_eq!(panel_rows(&s, &PhoneStatus::Paired).len(), 1);
+    }
+
+    #[test]
+    fn settings_card_height_grows_only_when_paired() {
+        assert_eq!(settings_h(false), 15.0 + 20.0 + 12.0 + 28.0 + 12.0 + 28.0 + 15.0);
+        assert_eq!(settings_h(true), settings_h(false) + 12.0 + 28.0);
+    }
+
     fn sess_with(status: Status, todos: Vec<Todo>) -> Session {
         Session { status, todos, ..sess("a", 1) }
     }
@@ -648,22 +674,22 @@ mod tests {
     #[test]
     fn idle_session_rows_show_todos_not_idle() {
         let s = sess_with(Status::Idle, vec![todo("a", TodoStatus::Completed), todo("b", TodoStatus::Pending), todo("c", TodoStatus::Completed)]);
-        let rows = panel_rows(&s);
+        let rows = panel_rows(&s, &PhoneStatus::Off);
         assert_eq!(rows, vec![(RowIcon::Check, "a".to_string()), (RowIcon::Check, "c".to_string())]);
         assert!(rows.iter().all(|(_, t)| t != "Idle"));
     }
 
     #[test]
     fn no_todos_idle_shows_no_tasks_recorded() {
-        assert_eq!(panel_rows(&sess_with(Status::Idle, vec![])), vec![(RowIcon::None, "No tasks recorded".to_string())]);
-        assert_eq!(panel_rows(&sess_with(Status::Working, vec![])), vec![(RowIcon::Spinner, "Working".to_string())]);
+        assert_eq!(panel_rows(&sess_with(Status::Idle, vec![]), &PhoneStatus::Off), vec![(RowIcon::None, "No tasks recorded".to_string())]);
+        assert_eq!(panel_rows(&sess_with(Status::Working, vec![]), &PhoneStatus::Off), vec![(RowIcon::Spinner, "Working".to_string())]);
     }
 
     #[test]
     fn in_progress_row_static_when_not_working() {
         let t = vec![todo("a", TodoStatus::InProgress)];
-        assert_eq!(panel_rows(&sess_with(Status::Working, t.clone()))[0].0, RowIcon::Spinner);
-        assert_eq!(panel_rows(&sess_with(Status::Idle, t))[0].0, RowIcon::Dot);
+        assert_eq!(panel_rows(&sess_with(Status::Working, t.clone()), &PhoneStatus::Off)[0].0, RowIcon::Spinner);
+        assert_eq!(panel_rows(&sess_with(Status::Idle, t), &PhoneStatus::Off)[0].0, RowIcon::Dot);
     }
 
     #[test]

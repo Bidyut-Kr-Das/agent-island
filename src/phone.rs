@@ -116,7 +116,6 @@ impl Phone {
     }
 
     #[cfg(test)]
-    #[allow(dead_code)]
     pub fn with_out(out: Sender<Out>) -> Phone {
         Phone { out: Some(out), ..Default::default() }
     }
