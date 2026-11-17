@@ -7,7 +7,8 @@ export const register: Register = (on) => {
   on('classic.SessionStart', async ($, e, next) => {
     stop?.() // startup, resume and /clear each change the session: end the old loop (kills its child)
     const child = $.process.spawn({ argv: [`${$.plugin.root}/bin/agent-islands.exe`, 'listen', e.session_id, e.cwd] })
-    const mine = () => { void child.return(undefined) } // return() on the stream kills the child
+    let dead = false // return() may queue behind a parked next(): drop a replaced child's lines meanwhile
+    const mine = () => { dead = true; void child.return({ code: null, signal: null }) } // return() kills the child
     stop = mine
     void (async () => {
       let buf = ''
@@ -16,6 +17,7 @@ export const register: Register = (on) => {
         const lines = (buf + piece.text).split('\n')
         buf = lines.pop() ?? ''
         for (const line of lines) {
+          if (dead) break
           try {
             void $.prompt.submit({ text: JSON.parse(line), asUser: true })
           } catch {} // not a JSON line: ignore
