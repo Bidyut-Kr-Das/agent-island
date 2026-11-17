@@ -32,7 +32,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agent-islands.exe\" hook",
-            "timeout": 40
+            "timeout": 610
           }
         ]
       }
@@ -77,7 +77,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/agent-islands.exe\" hook",
-            "timeout": 40
+            "timeout": 610
           }
         ]
       }

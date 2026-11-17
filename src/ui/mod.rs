@@ -71,6 +71,8 @@ impl Core {
                 // Dropping the Sender of a card the turn ended releases its waiting hook.
                 let perms = &self.state.permissions;
                 self.replies.retain(|id, _| perms.iter().any(|p| p.req_id == *id));
+                // A held question (ask with a reply) has no card yet (Task 4): `id` is None, the senders drop,
+                // and the server writes skip so the terminal dialog opens.
                 if let (Some(id), Some((reply, req))) = (id, reply) {
                     self.replies.insert(id, reply);
                     let _ = req.send(id);
@@ -179,8 +181,8 @@ pub fn run() {
         }
     };
     // Gating pause lives in memory only: every island start gates.
-    let paused = Arc::new(AtomicBool::new(false));
-    if crate::server::spawn(tx.clone(), wake, paused.clone()).is_err() {
+    let away = Arc::new(AtomicBool::new(false));
+    if crate::server::spawn(tx.clone(), wake, away.clone()).is_err() {
         return;
     }
     let viewport = ViewportBuilder::default()
@@ -215,7 +217,7 @@ pub fn run() {
             #[cfg(not(debug_assertions))]
             let open_req = None;
             let app = App {
-                core, rx, hwnd, region: Vec::new(), trimmed: false, selected: None, open_req, was_down: false, side, settings_open: false, paused, arming: None, press_at: f64::NEG_INFINITY,
+                core, rx, hwnd, region: Vec::new(), trimmed: false, selected: None, open_req, was_down: false, side, settings_open: false, away, arming: None, press_at: f64::NEG_INFINITY,
                 // Test hook, debug builds only: AGENT_ISLANDS_CLICK=allow|deny answers the first permission card 1 s after it shows.
                 #[cfg(debug_assertions)]
                 auto_click: parse_click(std::env::var("AGENT_ISLANDS_CLICK").ok().as_deref()),
@@ -246,7 +248,7 @@ struct App {
     side: Side,
     settings_open: bool,
     /// Shared with the pipe server: gated commands skip the gate while set.
-    paused: Arc<AtomicBool>,
+    away: Arc<AtomicBool>,
     /// Pointer history for the permission card on screen.
     arming: Option<views::Arming>,
     /// When the latest mouse press started (egui time).
@@ -296,7 +298,7 @@ impl eframe::App for App {
             View::Waiting(id) => Some(id.clone()),
             _ => self.selected.clone(),
         };
-        let pill = views::pill(ui, &self.core, marked.as_deref(), self.side, self.paused.load(Ordering::Relaxed), t);
+        let pill = views::pill(ui, &self.core, marked.as_deref(), self.side, self.away.load(Ordering::Relaxed), t);
         if pill.secondary_clicked() {
             self.settings_open = !self.settings_open;
         }
@@ -348,9 +350,9 @@ impl eframe::App for App {
                 (rect, 8.0)
             }
             View::Panel | View::Pill if self.settings_open => {
-                let (rect, clicked, gate, disconnect) = views::settings_card(ui, r, self.side, self.paused.load(Ordering::Relaxed), matches!(phone, PhoneStatus::Paired));
+                let (rect, clicked, gate, disconnect) = views::settings_card(ui, r, self.side, self.away.load(Ordering::Relaxed), matches!(phone, PhoneStatus::Paired));
                 if let Some(v) = gate {
-                    self.paused.store(v, Ordering::Relaxed);
+                    self.away.store(v, Ordering::Relaxed);
                 }
                 if disconnect {
                     self.core.phone.disconnect();

@@ -27,16 +27,19 @@ pub enum Msg {
     Sent { message_id: i64, session_id: String },
 }
 
-/// Fails if another island already owns the pipe. While `paused` is set, gated commands skip the gate.
-pub fn spawn(tx: Sender<Msg>, wake: impl Fn() + Send + Clone + 'static, paused: Arc<AtomicBool>) -> std::io::Result<()> {
+/// Island wait for a card: normal, and while away.
+const WAIT: (Duration, Duration) = (Duration::from_secs(30), Duration::from_secs(600));
+
+/// Fails if another island already owns the pipe. `away` makes cards wait 600 s and holds questions.
+pub fn spawn(tx: Sender<Msg>, wake: impl Fn() + Send + Clone + 'static, away: Arc<AtomicBool>) -> std::io::Result<()> {
     let mut server = Server::create_first()?;
     std::thread::spawn(move || {
         loop {
             match server.accept() {
                 Ok(f) => {
-                    let (tx, wake, paused) = (tx.clone(), wake.clone(), paused.clone());
+                    let (tx, wake, away) = (tx.clone(), wake.clone(), away.clone());
                     std::thread::spawn(move || {
-                        let _ = serve(f, &tx, &wake, &paused);
+                        let _ = serve(f, &tx, &wake, &away, WAIT);
                     });
                 }
                 Err(_) => std::thread::sleep(Duration::from_millis(50)),
@@ -47,7 +50,8 @@ pub fn spawn(tx: Sender<Msg>, wake: impl Fn() + Send + Clone + 'static, paused: 
 }
 
 /// Any failure (bad JSON, broken pipe, dead receiver) just ends this connection thread.
-fn serve(f: std::fs::File, tx: &Sender<Msg>, wake: &impl Fn(), paused: &AtomicBool) -> Option<()> {
+/// `wait` is (normal, away) so tests can shrink the windows.
+fn serve(f: std::fs::File, tx: &Sender<Msg>, wake: &impl Fn(), away: &AtomicBool, wait: (Duration, Duration)) -> Option<()> {
     let mut line = String::new();
     BufReader::new(&f).read_line(&mut line).ok()?;
     let mut v: Value = serde_json::from_str(&line).ok()?;
@@ -64,17 +68,18 @@ fn serve(f: std::fs::File, tx: &Sender<Msg>, wake: &impl Fn(), paused: &AtomicBo
     let token = v["token"].as_str().map(str::to_owned);
     let mut raw = v["event"].take();
     // The hook ran the command gate (spec 9a); only its envelope flag counts, never a field in the event.
-    let mut gated = v["gated"] == true;
-    // Gating paused: the hook stays silent at once and the command is plain activity, no card.
-    if gated && paused.load(Ordering::Relaxed) {
-        (&f).write_all(b"{\"decision\":\"skip\"}
-").ok()?;
-        gated = false;
-    }
+    let gated = v["gated"] == true;
+    let is_away = away.load(Ordering::Relaxed);
     if let Some(o) = raw.as_object_mut() {
         o.insert("gated".into(), gated.into());
     }
-    let wants = gated || raw["hook_event_name"] == "PermissionRequest" && raw["tool_name"] != "AskUserQuestion";
+    // A question is held only while away; otherwise the hook stays silent and the dialog opens at once.
+    let ask = v["ask"] == true;
+    let held_ask = ask && is_away;
+    if ask && !is_away {
+        (&f).write_all(b"{\"decision\":\"skip\"}\n").ok()?;
+    }
+    let wants = gated || held_ask || raw["hook_event_name"] == "PermissionRequest" && raw["tool_name"] != "AskUserQuestion";
     if !wants {
         tx.send(Msg::Event { raw, chain, reply: None, token }).ok()?;
         wake();
@@ -84,28 +89,43 @@ fn serve(f: std::fs::File, tx: &Sender<Msg>, wake: &impl Fn(), paused: &AtomicBo
     let (qtx, qrx) = channel();
     tx.send(Msg::Event { raw, chain, reply: Some((rtx, qtx)), token }).ok()?;
     wake();
-    let id = qrx.recv().ok()?;
-    match rrx.recv_timeout(Duration::from_secs(30)) {
-        Ok(r) => {
-            let d = if matches!(r, Reply::Allow) { "allow" } else { "deny" };
-            (&f).write_all(format!("{{\"decision\":\"{d}\"}}\n").as_bytes()).ok()?;
+    // A held question the core does not take (it drops the senders): release the hook so the dialog opens.
+    let Ok(id) = qrx.recv() else {
+        if held_ask {
+            (&f).write_all(b"{\"decision\":\"skip\"}\n").ok()?;
         }
-        // The card was dropped (the turn ended): a gated command is denied, a permission request gets nothing.
-        Err(RecvTimeoutError::Disconnected) => {
-            if gated {
-                (&f).write_all(b"{\"decision\":\"deny\"}\n").ok()?;
+        return None;
+    };
+    let mut window = if is_away { wait.1 } else { wait.0 };
+    loop {
+        let line = match rrx.recv_timeout(window) {
+            // Away turned off: a waiting card gets a fresh normal window.
+            Ok(Reply::Rearm) if !held_ask => {
+                window = wait.0;
+                continue;
             }
-        }
-        Err(RecvTimeoutError::Timeout) => {
-            // A gated hook must tell a timeout from a dead island; a permission request gets nothing.
-            if gated {
-                (&f).write_all(b"{\"decision\":\"timeout\"}\n").ok()?;
+            Ok(Reply::Answer(answers)) if held_ask => serde_json::json!({"decision": "answer", "answers": answers}).to_string(),
+            // Anything else to a held question just lets the dialog open.
+            Ok(_) if held_ask => r#"{"decision":"skip"}"#.to_owned(),
+            Ok(Reply::Allow) => r#"{"decision":"allow"}"#.to_owned(),
+            Ok(_) => r#"{"decision":"deny"}"#.to_owned(),
+            // The card was dropped (the turn ended): a gated command is denied, a permission request gets nothing.
+            Err(RecvTimeoutError::Disconnected) if held_ask => r#"{"decision":"skip"}"#.to_owned(),
+            Err(RecvTimeoutError::Disconnected) if gated => r#"{"decision":"deny"}"#.to_owned(),
+            Err(RecvTimeoutError::Disconnected) => return Some(()),
+            Err(RecvTimeoutError::Timeout) => {
+                // A gated hook must tell a timeout from a dead island; a permission request or question gets nothing.
+                if gated {
+                    (&f).write_all(b"{\"decision\":\"timeout\"}\n").ok()?;
+                }
+                tx.send(Msg::Timeout(id)).ok()?;
+                wake();
+                return Some(());
             }
-            tx.send(Msg::Timeout(id)).ok()?;
-            wake();
-        }
+        };
+        (&f).write_all(format!("{line}\n").as_bytes()).ok()?;
+        return Some(());
     }
-    Some(())
 }
 
 #[cfg(test)]
@@ -115,16 +135,16 @@ mod tests {
 
     /// Sends one envelope line through a real pipe to `serve` and returns what it hands the core.
     fn send(tag: &str, envelope: Value) -> (Msg, std::fs::File) {
-        send_paused(tag, envelope, false)
+        send_with(tag, envelope, false, WAIT)
     }
 
-    fn send_paused(tag: &str, envelope: Value, paused: bool) -> (Msg, std::fs::File) {
+    fn send_with(tag: &str, envelope: Value, away: bool, wait: (Duration, Duration)) -> (Msg, std::fs::File) {
         let name = format!(r"\\.\pipe\ai-test-srv-{tag}-{}", std::process::id());
         let mut server = Server::create_first_named(&name).unwrap();
         let (tx, rx): (Sender<Msg>, Receiver<Msg>) = channel();
         std::thread::spawn(move || {
             let f = server.accept().unwrap();
-            let _ = serve(f, &tx, &|| {}, &AtomicBool::new(paused));
+            let _ = serve(f, &tx, &|| {}, &AtomicBool::new(away), wait);
         });
         let (mut c, _) = crate::pipe::connect_to(&name).unwrap();
         c.write_all(format!("{envelope}\n").as_bytes()).unwrap();
@@ -145,7 +165,7 @@ mod tests {
         let (tx, rx): (Sender<Msg>, Receiver<Msg>) = channel();
         std::thread::spawn(move || {
             let f = server.accept().unwrap();
-            let _ = serve(f, &tx, &|| {}, &AtomicBool::new(false));
+            let _ = serve(f, &tx, &|| {}, &AtomicBool::new(false), WAIT);
         });
         let (mut c, _) = crate::pipe::connect_to(&name).unwrap();
         c.write_all(b"{\"listen\": \"\", \"cwd\": \"x\", \"chain\": []}\n").unwrap();
@@ -217,13 +237,58 @@ mod tests {
     }
 
     #[test]
-    fn paused_gated_replies_skip_and_does_not_wait() {
+    fn gated_never_skips_when_away_off() {
         let ev = serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": "PowerShell"});
-        let (msg, c) = send_paused("paused", serde_json::json!({"event": ev, "chain": [], "gated": true}), true);
+        let (msg, _c) = send("gnoskip", serde_json::json!({"event": ev, "chain": [], "gated": true}));
         let Msg::Event { raw, reply, .. } = msg else { panic!() };
+        assert!(reply.is_some());
+        assert_eq!(raw["gated"], true);
+    }
+
+    fn ask_envelope() -> Value {
+        serde_json::json!({"event": {"hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion"}, "chain": [], "ask": true})
+    }
+
+    #[test]
+    fn ask_not_away_skips_and_does_not_wait() {
+        let (msg, c) = send_with("asknot", ask_envelope(), false, WAIT);
+        let Msg::Event { reply, .. } = msg else { panic!() };
         assert!(reply.is_none());
-        assert_eq!(raw["gated"], false);
-        assert_eq!(read_all(c), "{\"decision\":\"skip\"}
-");
+        assert_eq!(read_all(c), "{\"decision\":\"skip\"}\n");
+    }
+
+    #[test]
+    fn ask_away_waits_and_writes_answers() {
+        let (msg, c) = send_with("askaway", ask_envelope(), true, WAIT);
+        let Msg::Event { reply, .. } = msg else { panic!() };
+        let (rtx, qtx) = reply.expect("a held question waits");
+        qtx.send(1).unwrap();
+        rtx.send(Reply::Answer(serde_json::json!({"Q?": "B"}))).unwrap();
+        let got: Value = serde_json::from_str(&read_all(c)).unwrap();
+        assert_eq!(got, serde_json::json!({"decision": "answer", "answers": {"Q?": "B"}}));
+    }
+
+    #[test]
+    fn untaken_held_question_writes_skip() {
+        let (msg, c) = send_with("askdrop", ask_envelope(), true, WAIT);
+        let Msg::Event { reply, .. } = msg else { panic!() };
+        drop(reply); // the core never takes it
+        assert_eq!(read_all(c), "{\"decision\":\"skip\"}\n");
+    }
+
+    #[test]
+    fn rearm_restarts_with_30s() {
+        // Normal window 1.5 s, away window 60 s: after Rearm the card times out on the short one.
+        let wait = (Duration::from_millis(1500), Duration::from_secs(60));
+        let ev = serde_json::json!({"hook_event_name": "PreToolUse", "tool_name": "PowerShell"});
+        let (msg, c) = send_with("rearm", serde_json::json!({"event": ev, "chain": [], "gated": true}), true, wait);
+        let Msg::Event { reply, .. } = msg else { panic!() };
+        let (rtx, qtx) = reply.unwrap();
+        qtx.send(1).unwrap();
+        rtx.send(Reply::Rearm).unwrap();
+        let h = std::thread::spawn(move || read_all(c));
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(!h.is_finished(), "no reply within 1 s of the rearm");
+        assert_eq!(h.join().unwrap(), "{\"decision\":\"timeout\"}\n");
     }
 }

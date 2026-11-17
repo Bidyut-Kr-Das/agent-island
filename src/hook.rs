@@ -16,6 +16,10 @@ const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 pub enum Reply {
     Allow,
     Deny,
+    /// Away turned off: the waiting card gets a fresh 30 s window. Never printed by a hook.
+    Rearm,
+    /// A held AskUserQuestion's answers map, keyed by question text.
+    Answer(Value),
 }
 
 pub fn decision_output(reply: Option<Reply>, verified: bool) -> Option<String> {
@@ -24,7 +28,7 @@ pub fn decision_output(reply: Option<Reply>, verified: bool) -> Option<String> {
     }
     let decision = match reply? {
         Reply::Allow => r#"{"behavior":"allow"}"#,
-        Reply::Deny => r#"{"behavior":"deny","message":"Denied from Agent Islands"}"#,
+        Reply::Deny | Reply::Rearm | Reply::Answer(_) => r#"{"behavior":"deny","message":"Denied from Agent Islands"}"#,
     };
     Some(format!(
         r#"{{"hookSpecificOutput":{{"hookEventName":"PermissionRequest","decision":{decision}}}}}"#
@@ -36,11 +40,19 @@ pub fn pretool_output(reply: Option<Reply>, verified: bool, timed_out: bool) -> 
     let deny = |why: &str| format!(r#""deny","permissionDecisionReason":"{why}""#);
     let decision = match (verified, reply) {
         (true, Some(Reply::Allow)) => r#""allow""#.to_owned(),
-        (true, Some(Reply::Deny)) => deny("Denied from Agent Islands"),
-        (true, None) if timed_out => deny("No answer in Agent Islands within 30 seconds"),
+        (true, Some(Reply::Deny | Reply::Rearm | Reply::Answer(_))) => deny("Denied from Agent Islands"),
+        (true, None) if timed_out => deny("No answer in Agent Islands in time"),
         _ => deny("Agent Islands is not running"),
     };
     format!(r#"{{"hookSpecificOutput":{{"hookEventName":"PreToolUse","permissionDecision":{decision}}}}}"#)
+}
+
+/// A held AskUserQuestion: the island's answers skip the dialog; anything else prints nothing.
+fn ask_output(reply: Option<Reply>, verified: bool, event: &Value) -> Option<String> {
+    let (true, Some(Reply::Answer(answers))) = (verified, reply) else { return None };
+    let out = json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+        "updatedInput": {"questions": event["tool_input"]["questions"], "answers": answers}}});
+    Some(out.to_string())
 }
 
 /// Same file content. Two installs of one build must match; any IO error means not the same.
@@ -102,22 +114,27 @@ pub(crate) fn connect_retry(name: &str, spawn: bool) -> Option<(std::fs::File, u
     }
 }
 
-/// The island's decision: "allow", "deny", or "timeout" / "skip" (gated requests only).
-fn read_reply(f: std::fs::File) -> Option<String> {
+/// The island's reply line: `decision` is "allow", "deny", "answer", or "timeout" / "skip".
+fn read_reply(f: std::fs::File) -> Option<Value> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut line = String::new();
         let _ = BufReader::new(f).read_line(&mut line);
         let _ = tx.send(line);
     });
-    let line = rx.recv_timeout(Duration::from_secs(35)).ok()?;
-    Some(serde_json::from_str::<Value>(&line).ok()?["decision"].as_str()?.to_owned())
+    let line = rx.recv_timeout(Duration::from_secs(605)).ok()?;
+    serde_json::from_str(&line).ok()
 }
 
-fn to_reply(d: Option<&str>) -> Option<Reply> {
-    match d? {
+fn decision(v: &Option<Value>) -> Option<&str> {
+    v.as_ref()?["decision"].as_str()
+}
+
+fn to_reply(v: &Option<Value>) -> Option<Reply> {
+    match decision(v)? {
         "allow" => Some(Reply::Allow),
         "deny" => Some(Reply::Deny),
+        "answer" => Some(Reply::Answer(v.as_ref()?["answers"].clone())),
         _ => None,
     }
 }
@@ -153,12 +170,16 @@ fn forward_with_token(name: &str, spawn: bool, event: Value, gated: bool, token:
     if !verified {
         return None;
     }
+    let ask = event["hook_event_name"] == "PreToolUse" && event["tool_name"] == "AskUserQuestion";
     let wants_reply = event["hook_event_name"] == "PermissionRequest"
         && event["tool_name"] != "AskUserQuestion";
     let chain = if gated || needs_chain(&event, spawned) { procs::ancestors(std::process::id()) } else { Vec::new() };
     let mut msg = json!({"event": event, "chain": chain});
     if gated {
         msg["gated"] = json!(true);
+    }
+    if ask {
+        msg["ask"] = json!(true);
     }
     if let Some(t) = token {
         msg["token"] = json!(t);
@@ -168,16 +189,15 @@ fn forward_with_token(name: &str, spawn: bool, event: Value, gated: bool, token:
     f.write_all(line.as_bytes()).ok()?;
     if gated {
         let d = read_reply(f);
-        // Gating paused in the island: print nothing, Claude Code's own permission rules decide.
-        if d.as_deref() == Some("skip") {
-            return Some(String::new());
-        }
-        return Some(pretool_output(to_reply(d.as_deref()), verified, d.as_deref() == Some("timeout")));
+        return Some(pretool_output(to_reply(&d), verified, decision(&d) == Some("timeout")));
+    }
+    if ask {
+        return ask_output(to_reply(&read_reply(f)), verified, &event);
     }
     if !wants_reply {
         return None;
     }
-    decision_output(to_reply(read_reply(f).as_deref()), verified)
+    decision_output(to_reply(&read_reply(f)), verified)
 }
 
 pub fn run() -> i32 {
@@ -254,9 +274,9 @@ mod tests {
         let ev = json!({"hook_event_name":"PostToolUse","tool_name":"Bash"});
         for (tag, token) in [("set", Some("")), ("unset", None)] {
             let name = format!(r"\\.\pipe\ai-test-token-{tag}-{}", std::process::id());
-            let t = serve(&name, Some("{\"decision\":\"skip\"}\n"));
+            let t = serve(&name, Some("{\"decision\":\"deny\"}\n"));
             // gated: the hook waits for the reply, so the pipe stays open until the server read the line
-            assert_eq!(forward_with_token(&name, false, ev.clone(), true, token), Some(String::new()));
+            assert!(forward_with_token(&name, false, ev.clone(), true, token).is_some());
             let sent: serde_json::Value = serde_json::from_str(&t.join().unwrap()).unwrap();
             assert_eq!(sent.get("token").and_then(|v| v.as_str()), token);
         }
@@ -363,8 +383,9 @@ mod tests {
     }
 
     #[test]
-    fn gated_timeout_prints_deny_with_timeout_reason() {
-        let want = pre_deny("No answer in Agent Islands within 30 seconds");
+    fn gated_timeout_reason_is_in_time() {
+        assert!(pretool_output(None, true, true).contains("No answer in Agent Islands in time"));
+        let want = pre_deny("No answer in Agent Islands in time");
         assert_eq!(pretool_output(None, true, true), want);
         let name = format!(r"\\.\pipe\ai-test-gtimeout-{}", std::process::id());
         let t = serve(&name, Some("{\"decision\":\"timeout\"}\n"));
@@ -372,11 +393,26 @@ mod tests {
         t.join().unwrap();
     }
 
+    const ASK: &str = r#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Q?","options":[{"label":"A"},{"label":"B"}]}]}}"#;
+
     #[test]
-    fn gated_skip_prints_nothing() {
-        let name = format!(r"\\.\pipe\ai-test-gskip-{}", std::process::id());
+    fn ask_answer_prints_updated_input() {
+        let name = format!(r"\\.\pipe\ai-test-askans-{}", std::process::id());
+        let t = serve(&name, Some("{\"decision\":\"answer\",\"answers\":{\"Q?\":\"B\"}}\n"));
+        let out = run_with(&name, false, ASK).unwrap();
+        let input: Value = serde_json::from_str(ASK).unwrap();
+        let want = json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+            "updatedInput": {"questions": input["tool_input"]["questions"], "answers": {"Q?": "B"}}}});
+        assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), want);
+        let sent: Value = serde_json::from_str(&t.join().unwrap()).unwrap();
+        assert_eq!(sent["ask"], true);
+    }
+
+    #[test]
+    fn ask_skip_prints_nothing() {
+        let name = format!(r"\\.\pipe\ai-test-askskip-{}", std::process::id());
         let t = serve(&name, Some("{\"decision\":\"skip\"}\n"));
-        assert_eq!(run_with(&name, false, GATED).as_deref(), Some(""));
+        assert_eq!(run_with(&name, false, ASK), None);
         t.join().unwrap();
     }
 
