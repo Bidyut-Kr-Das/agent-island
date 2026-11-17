@@ -13,6 +13,8 @@ pub enum Msg {
         raw: Value,
         chain: Vec<(u32, String)>,
         reply: Option<(Sender<Reply>, Sender<u64>)>,
+        /// Telegram bot token from the hook's plugin option; Some("") means off.
+        token: Option<String>,
     },
     /// A `listen` helper: Core keeps `pipe` open and writes phone prompts to it.
     Listen { session_id: String, cwd: String, chain: Vec<(u32, String)>, pipe: std::fs::File },
@@ -52,6 +54,7 @@ fn serve(f: std::fs::File, tx: &Sender<Msg>, wake: &impl Fn(), paused: &AtomicBo
         wake();
         return Some(());
     }
+    let token = v["token"].as_str().map(str::to_owned);
     let mut raw = v["event"].take();
     // The hook ran the command gate (spec 9a); only its envelope flag counts, never a field in the event.
     let mut gated = v["gated"] == true;
@@ -66,13 +69,13 @@ fn serve(f: std::fs::File, tx: &Sender<Msg>, wake: &impl Fn(), paused: &AtomicBo
     }
     let wants = gated || raw["hook_event_name"] == "PermissionRequest" && raw["tool_name"] != "AskUserQuestion";
     if !wants {
-        tx.send(Msg::Event { raw, chain, reply: None }).ok()?;
+        tx.send(Msg::Event { raw, chain, reply: None, token }).ok()?;
         wake();
         return Some(());
     }
     let (rtx, rrx) = channel();
     let (qtx, qrx) = channel();
-    tx.send(Msg::Event { raw, chain, reply: Some((rtx, qtx)) }).ok()?;
+    tx.send(Msg::Event { raw, chain, reply: Some((rtx, qtx)), token }).ok()?;
     wake();
     let id = qrx.recv().ok()?;
     match rrx.recv_timeout(Duration::from_secs(30)) {
@@ -126,6 +129,17 @@ mod tests {
         let (msg, _c) = send("listen", serde_json::json!({"listen": "s", "cwd": "x", "chain": []}));
         let Msg::Listen { session_id, cwd, .. } = msg else { panic!() };
         assert_eq!((session_id.as_str(), cwd.as_str()), ("s", "x"));
+    }
+
+    #[test]
+    fn token_is_passed_to_core() {
+        let ev = serde_json::json!({"hook_event_name": "PostToolUse"});
+        let (msg, _c) = send("tok", serde_json::json!({"event": ev, "chain": [], "token": "t:1"}));
+        let Msg::Event { token, .. } = msg else { panic!() };
+        assert_eq!(token.as_deref(), Some("t:1"));
+        let (msg, _c) = send("notok", serde_json::json!({"event": ev, "chain": []}));
+        let Msg::Event { token, .. } = msg else { panic!() };
+        assert_eq!(token, None);
     }
 
     #[test]

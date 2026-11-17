@@ -6,6 +6,8 @@ use std::io::Write;
 #[derive(Default)]
 pub struct Phone {
     listeners: HashMap<String, File>,
+    /// Telegram bot token; empty means the link is off. Never log it.
+    token: String,
 }
 
 impl Phone {
@@ -24,6 +26,10 @@ impl Phone {
         }
         self.listeners.insert(session_id.to_owned(), f);
         true
+    }
+
+    pub fn set_token(&mut self, t: String) {
+        self.token = t;
     }
 
     pub fn forget(&mut self, session_id: &str) {
