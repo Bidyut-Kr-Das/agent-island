@@ -57,8 +57,8 @@ pub fn hit(p: Pos2, r: Rect) -> bool {
     p.distance(Pos2::new(r.center().x, y)) <= rad
 }
 
-/// `paused`: gating is paused, the outline turns amber so the user sees the gate is off.
-pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, paused: bool, t: f64) -> egui::Response {
+/// `away`: Away mode is on, the outline turns amber so the user sees everything goes to the phone.
+pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, away: bool, t: f64) -> egui::Response {
     let h = ui.ctx().animate_value_with_time(Id::unique("pill_h"), pill_height(core.state.sessions.len()), 0.25);
     let r = Rect::from_min_size(pos2(pill_x(side), MARGIN), vec2(PILL_W, h));
     let resp = ui.allocate_rect(r, Sense::click());
@@ -68,7 +68,7 @@ pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, 
     let p = ui.painter();
     let rad = PILL_W / 2.0;
     p.add(Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(115) }.as_shape(r, rad));
-    let edge = if paused { Stroke::new(1.5, WARN) } else { Stroke::new(1.0, LINE) };
+    let edge = if away { Stroke::new(1.5, WARN) } else { Stroke::new(1.0, LINE) };
     p.rect(r, rad, BG, edge, StrokeKind::Inside);
     let clip = p.with_clip_rect(r.shrink(1.0));
     for (i, s) in core.state.sessions.iter().enumerate() {

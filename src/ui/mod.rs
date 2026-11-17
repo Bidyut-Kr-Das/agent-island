@@ -40,7 +40,7 @@ impl Core {
                 if let Some(t) = token {
                     let empty = t.is_empty();
                     self.phone.set_token(t);
-                    if empty || self.phone.chat.load(Ordering::Relaxed) == 0 {
+                    if (empty || self.phone.chat.load(Ordering::Relaxed) == 0) && self.phone.away.load(Ordering::Relaxed) {
                         self.set_away(false);
                     }
                 }
@@ -78,6 +78,10 @@ impl Core {
                         let card = id.and_then(|id| self.state.permissions.iter().find(|p| p.req_id == id));
                         self.phone.on_event(&raw, s, card);
                     }
+                }
+                // A turn ending also ends that session's held questions: the hook is gone, so a late tap or text must not reach them.
+                if matches!(ev.name.as_str(), "Stop" | "StopFailure" | "UserPromptSubmit") {
+                    self.phone.drop_session_asks(&ev.session_id);
                 }
                 // Dropping the Sender of a card the turn ended releases its waiting hook.
                 let perms = &self.state.permissions;
@@ -781,6 +785,39 @@ mod tests {
         c.handle(Msg::Event { raw: raw("Stop", "t"), chain: vec![], reply: None, token: Some(String::new()) }, 2);
         assert!(!c.phone.away.load(Ordering::Relaxed));
         assert!(matches!(rx.try_recv(), Ok(Reply::Rearm)));
+    }
+
+    #[test]
+    fn unpaired_events_do_not_rewrite_settings() {
+        let p = std::env::temp_dir().join(format!("ai-unpaired-{}.json", std::process::id()));
+        let before = "{  \"away\" :false }";
+        std::fs::write(&p, before).unwrap();
+        let mut c = Core::new(channel().0);
+        c.phone.settings = Some(p.clone());
+        for _ in 0..3 {
+            c.handle(Msg::Event { raw: raw("PreToolUse", "s"), chain: vec![], reply: None, token: Some(String::new()) }, 1);
+        }
+        let after = std::fs::read_to_string(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(after, before, "settings.json was rewritten");
+    }
+
+    #[test]
+    fn turn_end_drops_session_asks() {
+        use crate::telegram::{Incoming, Out};
+        for end in ["Stop", "StopFailure", "UserPromptSubmit"] {
+            let (mut c, orx) = away_core();
+            let (rx, id) = ask_event(&mut c, "s");
+            let (other, other_id) = ask_event(&mut c, "t");
+            event(&mut c, end, "s", false);
+            assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)), "{end}");
+            assert!(!c.phone.asks.contains_key(&id) && c.phone.timed_out.contains(&id) && !c.replies.contains_key(&id));
+            assert!(c.phone.asks.contains_key(&other_id) && c.replies.contains_key(&other_id), "other session untouched");
+            assert!(matches!(other.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
+            while orx.try_recv().is_ok() {}
+            c.handle(Msg::Phone(Incoming::Button { chat: 7, callback_id: "c".into(), data: format!("a:{id}"), date: i64::MAX }), 3);
+            assert!(matches!(orx.try_recv(), Ok(Out::Answer { text, .. }) if text == "Too late, answered in the terminal"));
+        }
     }
 
     #[test]

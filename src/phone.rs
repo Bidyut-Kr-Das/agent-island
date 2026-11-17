@@ -464,6 +464,14 @@ impl Phone {
         self.asks.remove(&id);
     }
 
+    /// A session's turn ended, so its hook is gone: drop its held questions.
+    pub fn drop_session_asks(&mut self, session_id: &str) {
+        let ids: Vec<u64> = self.asks.iter().filter(|(_, a)| a.session_id == session_id).map(|(id, _)| *id).collect();
+        for id in ids {
+            self.drop_ask(id);
+        }
+    }
+
     pub fn on_event(&mut self, raw: &Value, s: &Session, card: Option<&Permission>) {
         if self.chat.load(Ordering::Relaxed) == 0 || !self.away.load(Ordering::Relaxed) {
             return;
