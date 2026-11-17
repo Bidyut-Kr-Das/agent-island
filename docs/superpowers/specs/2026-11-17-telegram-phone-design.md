@@ -1,7 +1,7 @@
 # Telegram phone link: design
 
 Date: 2026-11-17
-Status: awaiting approval
+Status: approved
 
 ## Intent
 
