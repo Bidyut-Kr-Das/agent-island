@@ -33,7 +33,7 @@ See every session at a glance, follow its todos, and answer permission prompts w
 - **Live todos.** The panel shows each session's todo list as Claude updates it. After an island restart, the list is rebuilt from the session transcript.
 - **Answer from the island.** Permission prompts open a card with Allow and Deny. With no answer within 30 seconds, the normal terminal prompt takes over.
 - **Go to terminal.** Questions and waiting sessions get a button that brings the right Windows Terminal window and tab to the front.
-- **Command gate.** Risky shell commands always ask on the island, even in auto mode: `rm`, `del`, `Remove-Item`, `git commit`, `git push`, `git reset`, and package installs (`npm`, `pnpm`, `yarn`, `bun`, `pip`, `uv`, `cargo`). Going AFK? Set **Gating: Paused** in Settings (right-click the pill): gated commands then follow Claude Code's own permission rules, and the pill outline turns amber until you resume or restart the island.
+- **Command gate.** Risky shell commands always ask on the island, even in auto mode: `rm`, `del`, `Remove-Item`, `git commit`, `git push`, `git reset`, and package installs (`npm`, `pnpm`, `yarn`, `bun`, `pip`, `uv`, `cargo`).
 - **Finished pill.** Shows sessions that stopped while you looked elsewhere. Click it to clear.
 - **Left or right.** Right-click the pill to dock the island on either side of the screen.
 - **Phone link (optional).** Get each session's events on Telegram and reply from your phone. Off until you set a bot token. See [Phone link](#phone-link).
@@ -93,12 +93,21 @@ Replies:
 - A message that is not a reply goes to the only open session. If more than one is open, the bot asks `Which session?`.
 - If the session is busy, your reply runs after the current turn, and the bot says `Queued: <name> is busy`.
 - Messages sent while no session is open are not delivered. The bot says so once.
-- Permission cards still time out after 30 seconds. When you are away, pause gating from the island's right-click settings (see Command gate above).
+- Permission cards still time out after 30 seconds. When you are away, turn on Away (see Away mode below).
 - For voice, use your phone keyboard's dictation.
 
 Messages pass through Telegram's servers.
 
 Disconnect: right-click the island, choose the **Phone** row, then **Disconnect**. Removing the token in `/plugin` turns the feature off.
+
+## Away mode
+
+Away mode sends everything to Telegram while you are away from the PC. Right-click the island, open **Settings**, and turn on **Away**. It needs a paired phone.
+
+- **Away off.** Telegram stays silent and everything is instant at the PC.
+- **Away on.** Every event goes to Telegram, and the pill outline turns amber. Permission cards and Claude's questions wait up to 10 minutes for you, then the normal terminal prompt takes over.
+- **Questions from the phone.** Claude's questions arrive with one button per option. Multi-choice questions also get **Done**. Reply with text to give your own answer.
+- **Turning Away off** releases everything that is waiting.
 
 ## Release
 

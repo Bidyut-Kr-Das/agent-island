@@ -6,8 +6,15 @@ Each `## [x.y.z]` section is the release note for tag `vx.y.z`. The release work
 
 ### Added
 - Telegram phone link. Optional and off until a bot token is set.
+- Away switch in Settings (right-click the island). With a paired phone, Away on sends everything to Telegram and waits up to 10 minutes before the terminal takes over. Away off keeps Telegram silent and everything instant at the PC.
+- Answer Claude's questions from the phone with buttons, **Done** for multi-choice, or a text reply for your own answer.
+- Redesigned settings card.
+
+### Removed
+- Gating: Paused. Away replaces it.
 
 ### Fixed
+- The jagged pill outline.
 - The island no longer drops a hook event when the hook closed its connection before the island accepted it.
 
 ## [0.1.9] - 2026-11-16
