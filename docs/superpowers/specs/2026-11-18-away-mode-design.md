@@ -110,7 +110,23 @@ The gated-command timeout reason becomes `No answer in Agent Islands in time`. I
 
 ### Settings card visuals
 
-The Away row lives in the settings card, which is being redesigned separately: the user found the current buttons dated. This design fixes only the row's content and behaviour: `Away`, two states, Off / On.
+The user picked mockup **A, "Compact controls"**: `.superpowers/brainstorm/1749-1794944299/content/settings-style.html`, first card. The whole settings card is redrawn this way. The user rejected the other two mockups for poor alignment and spacing, so alignment is part of the requirement.
+
+- **Card:** 264 px wide, radius 10, padding 14 / 16, background `#1c1d22`, 1 px border at white 12 %, the existing shadow. Title `Settings`, 13 px, weight 600.
+- **Rows:** label on the left, control on the right, at least 30 px tall, 8 px between rows. Every control's right edge lines up with the card's right padding. Labels are 12.5 px `FG2`.
+- **Side:** a pill segmented control with `Left` / `Right`:
+  - Track `#121317`, 1 px border at white 8 %, 2 px inner padding, segment text 12 px.
+  - Selected segment: fill `#2e3038`, inner 1 px line at white 10 %, text `FG`.
+  - Unselected segment: text `FG3`.
+- **Away:**
+  - Label `Away` with the sub-line `Send everything to Telegram` (11 px, `FG3`).
+  - On the right, a switch 34 × 20 with a 16 px knob. Off: track `#2e3038`, knob `FG2`, knob on the left. On: track amber `WARN #ffb800`, knob `#1c1d22`, knob on the right.
+  - Disabled (no paired phone): drawn at 40 % opacity, sub-line `Pair a phone first`, no click.
+- **Divider:** a 1 px line at white 7 % across the card's full width, between Away and Phone.
+- **Phone:**
+  - Paired: green dot (`OK`, 7 px) followed by `Phone paired`, with a `Disconnect` text link on the right (12 px, `#ff6b6b`).
+  - No paired phone, token set: `Not paired`, no link.
+- **No bot token:** the Away row, divider and Phone row are hidden. The card shows only Side.
 
 ## What the user decided
 
