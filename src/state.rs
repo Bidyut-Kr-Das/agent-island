@@ -272,6 +272,12 @@ impl State {
         }
     }
 
+    /// A fresh request id, for work that has no permission card (held questions).
+    pub fn next_id(&mut self) -> u64 {
+        self.next_req += 1;
+        self.next_req
+    }
+
     pub fn timeout(&mut self, req_id: u64) {
         if let Some(pos) = self.permissions.iter().position(|p| p.req_id == req_id) {
             // A gated command was already denied by the hook: nothing waits in the terminal.

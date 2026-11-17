@@ -61,6 +61,16 @@ pub fn message(raw: &Value, s: &Session, card: Option<&Permission>) -> Option<(S
     Some((format!("{} {}\n{}", circle(s.color), s.project, telegram::cut(&body)), buttons))
 }
 
+/// A held AskUserQuestion waiting for phone answers.
+#[allow(dead_code)] // answers and picks are filled by the answer flow (Task 5)
+pub struct Ask {
+    session_id: String,
+    questions: Vec<Value>,
+    answers: serde_json::Map<String, Value>,
+    picks: Vec<String>,
+    current: usize,
+}
+
 pub enum Action {
     None,
     /// Allow/Deny tap (request id, reply, callback id): Core decides if it still applies and answers the tap.
@@ -106,6 +116,9 @@ pub struct Phone {
     held: Option<String>,
     /// Permission ids whose hook gave up waiting.
     pub timed_out: HashSet<u64>,
+    /// Held questions by request id, and the Telegram message of each question to (id, question index).
+    pub asks: HashMap<u64, Ask>,
+    pub ask_msgs: HashMap<i64, (u64, usize)>,
     /// Settings file for `phone_chat`; None in tests.
     pub settings: Option<PathBuf>,
     /// Unix seconds at island start: Telegram messages and button taps dated before it are ignored.
@@ -122,7 +135,7 @@ impl Default for Phone {
     fn default() -> Phone {
         Phone {
             listeners: HashMap::new(), token: String::new(), link: None, out: None, tx: None, chat: Arc::default(), away: Arc::default(), sent: HashMap::new(),
-            delivered: HashMap::new(), code: new_code(), code_at: Instant::now(), wrong: 0, bot: None, held: None, timed_out: HashSet::new(), settings: None,
+            delivered: HashMap::new(), code: new_code(), code_at: Instant::now(), wrong: 0, bot: None, held: None, timed_out: HashSet::new(), asks: HashMap::new(), ask_msgs: HashMap::new(), settings: None,
             started: unix_now(), told_stale: false,
         }
     }
@@ -211,7 +224,7 @@ impl Phone {
 
     fn say(&self, text: impl Into<String>, buttons: Vec<(String, String)>) {
         if let Some(out) = self.out() {
-            let _ = out.send(Out::Send { session_id: None, text: text.into(), buttons });
+            let _ = out.send(Out::Send { session_id: None, text: text.into(), buttons, tag: None });
         }
     }
 
@@ -302,6 +315,46 @@ impl Phone {
         self.listeners.remove(session_id);
         self.delivered.remove(session_id);
         self.sent.retain(|_, s| s != session_id);
+        self.asks.retain(|_, a| a.session_id != session_id);
+    }
+
+    /// Holds a question set and sends question 0 with one button per option.
+    pub fn ask(&mut self, id: u64, session: &Session, questions: Vec<Value>) {
+        self.asks.insert(id, Ask { session_id: session.id.clone(), questions, answers: Default::default(), picks: vec![], current: 0 });
+        self.send_question(id, session);
+    }
+
+    fn send_question(&self, id: u64, s: &Session) {
+        let Some(a) = self.asks.get(&id) else { return };
+        let q = &a.questions[a.current];
+        let text = format!("{} {}
+{}
+{}", circle(s.color), s.project, q["header"].as_str().unwrap_or_default(), q["question"].as_str().unwrap_or_default());
+        let mut buttons: Vec<(String, String)> = q["options"].as_array().into_iter().flatten().enumerate()
+            .map(|(oi, o)| (o["label"].as_str().unwrap_or_default().to_owned(), format!("q:{id}:{}:{oi}", a.current))).collect();
+        if q["multiSelect"] == true {
+            buttons.push(("Done".into(), format!("q:{id}:{}:done", a.current)));
+        }
+        if let Some(out) = self.out() {
+            let _ = out.send(Out::Send { session_id: Some(s.id.clone()), text: telegram::cut(&text), buttons, tag: Some(format!("q:{id}:{}", a.current)) });
+        }
+    }
+
+    /// Remembers which held question a sent message (tag `q:<id>:<qi>`) carries.
+    pub fn note_sent(&mut self, message_id: i64, tag: Option<&str>) {
+        let mut it = tag.and_then(|t| t.strip_prefix("q:")).unwrap_or_default().split(':');
+        if let (Some(Ok(id)), Some(Ok(qi))) = (it.next().map(str::parse), it.next().map(str::parse))
+            && self.asks.contains_key(&id)
+        {
+            self.ask_msgs.insert(message_id, (id, qi));
+        }
+    }
+
+    /// Forgets a held question that was released or timed out; late taps for it get "Too late".
+    pub fn drop_ask(&mut self, id: u64) {
+        self.timed_out.insert(id);
+        self.asks.remove(&id);
+        self.ask_msgs.retain(|_, (i, _)| *i != id);
     }
 
     pub fn on_event(&mut self, raw: &Value, s: &Session, card: Option<&Permission>) {
@@ -317,7 +370,7 @@ impl Phone {
         if let Some((text, buttons)) = message(raw, s, card)
             && let Some(out) = self.out()
         {
-            let _ = out.send(Out::Send { session_id: Some(s.id.clone()), text, buttons });
+            let _ = out.send(Out::Send { session_id: Some(s.id.clone()), text, buttons, tag: None });
         }
     }
 }

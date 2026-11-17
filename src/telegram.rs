@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 pub enum Out {
-    Send { session_id: Option<String>, text: String, buttons: Vec<(String, String)> },
+    Send { session_id: Option<String>, text: String, buttons: Vec<(String, String)>, tag: Option<String> },
     Answer { callback_id: String, text: String },
 }
 
@@ -118,8 +118,8 @@ fn poll(agent: &ureq::Agent, token: &str, tx: &Sender<Msg>, stop: &AtomicBool) {
 fn send_loop(agent: &ureq::Agent, token: &str, chat: &AtomicI64, tx: &Sender<Msg>, rx: Receiver<Out>) {
     // Ends when the Link (the only Sender) is dropped.
     for o in rx {
-        let (method, body, session) = match o {
-            Out::Send { session_id, text, buttons } => {
+        let (method, body, session, tag) = match o {
+            Out::Send { session_id, text, buttons, tag } => {
                 let id = chat.load(Ordering::Relaxed);
                 if id == 0 {
                     continue;
@@ -129,14 +129,14 @@ fn send_loop(agent: &ureq::Agent, token: &str, chat: &AtomicI64, tx: &Sender<Msg
                     let row: Vec<Value> = buttons.iter().map(|(l, d)| json!({"text": l, "callback_data": d})).collect();
                     b["reply_markup"] = json!({"inline_keyboard": [row]});
                 }
-                ("sendMessage", b, session_id)
+                ("sendMessage", b, session_id, tag)
             }
-            Out::Answer { callback_id, text } => ("answerCallbackQuery", json!({"callback_query_id": callback_id, "text": text}), None),
+            Out::Answer { callback_id, text } => ("answerCallbackQuery", json!({"callback_query_id": callback_id, "text": text}), None, None),
         };
         for _ in 0..3 {
             if let Ok(r) = call(agent, token, method, &body) {
                 if let (Some(session_id), Some(message_id)) = (session, r["message_id"].as_i64()) {
-                    deliver(tx, Msg::Sent { message_id, session_id });
+                    deliver(tx, Msg::Sent { message_id, session_id, tag });
                 }
                 break;
             }

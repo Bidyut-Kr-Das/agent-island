@@ -68,18 +68,33 @@ impl Core {
                 let ended = (ev.name == "SessionEnd").then(|| self.state.sessions.iter().find(|s| s.id == ev.session_id).cloned()).flatten();
                 let id = self.state.apply(&ev, procs::find_pids(&chain), now);
                 let s = ended.or_else(|| self.state.sessions.iter().find(|s| s.id == ev.session_id).cloned());
-                if let Some(s) = s {
-                    let card = id.and_then(|id| self.state.permissions.iter().find(|p| p.req_id == id));
-                    self.phone.on_event(&raw, &s, card);
+                // A held question: the server only sends `reply` for it while away. It gets no card and
+                // no "Waiting for you" message; the question message replaces it.
+                let questions = (reply.is_some() && ev.name == "PreToolUse" && ev.tool_name.as_deref() == Some("AskUserQuestion"))
+                    .then(|| ev.tool_input["questions"].as_array().cloned())
+                    .flatten()
+                    .filter(|q| !q.is_empty());
+                if let Some(s) = &s {
+                    if questions.is_none() {
+                        let card = id.and_then(|id| self.state.permissions.iter().find(|p| p.req_id == id));
+                        self.phone.on_event(&raw, s, card);
+                    }
                 }
                 // Dropping the Sender of a card the turn ended releases its waiting hook.
                 let perms = &self.state.permissions;
-                self.replies.retain(|id, _| perms.iter().any(|p| p.req_id == *id));
-                // A held question (ask with a reply) has no card yet (Task 4): `id` is None, the senders drop,
-                // and the server writes skip so the terminal dialog opens.
-                if let (Some(id), Some((reply, req))) = (id, reply) {
-                    self.replies.insert(id, reply);
-                    let _ = req.send(id);
+                let asks = &self.phone.asks;
+                self.replies.retain(|id, _| perms.iter().any(|p| p.req_id == *id) || asks.contains_key(id));
+                // Any other reply without an id (a question that is not held) drops its senders: the server writes skip.
+                if let Some((reply, req)) = reply {
+                    if let Some(id) = id {
+                        self.replies.insert(id, reply);
+                        let _ = req.send(id);
+                    } else if let (Some(questions), Some(s)) = (questions, s) {
+                        let id = self.state.next_id();
+                        self.replies.insert(id, reply);
+                        self.phone.ask(id, &s, questions);
+                        let _ = req.send(id);
+                    }
                 }
             }
             Msg::Listen { session_id, cwd, chain, pipe } => {
@@ -106,12 +121,13 @@ impl Core {
                 self.phone.listen(session_id, pipe);
             }
             Msg::Timeout(id) => {
-                self.phone.timed_out.insert(id);
+                self.phone.drop_ask(id);
                 self.replies.remove(&id);
                 self.state.timeout(id);
             }
             Msg::Replay { session_id, todos } => self.state.set_todos(&session_id, todos),
-            Msg::Sent { message_id, session_id } => {
+            Msg::Sent { message_id, session_id, tag } => {
+                self.phone.note_sent(message_id, tag.as_deref());
                 // An ended session's last message ("Ended") is not routable: a reply would show its uuid.
                 if self.state.sessions.iter().any(|s| s.id == session_id) {
                     self.phone.sent.insert(message_id, session_id);
@@ -143,11 +159,16 @@ impl Core {
             let _ = settings::set(p, "away", on.into());
         }
         if was && !on {
+            // Held questions: dropping the sender makes the server write skip, so the dialog opens in the terminal.
+            let ids: Vec<u64> = self.phone.asks.keys().copied().collect();
+            for id in ids {
+                self.replies.remove(&id);
+                self.phone.drop_ask(id);
+            }
             // Cards get a fresh 30 s island wait.
             for tx in self.replies.values() {
                 let _ = tx.send(Reply::Rearm);
             }
-            // Task 4: also remove every waiting question sender here, so the terminal dialog opens.
         }
     }
 
@@ -802,13 +823,83 @@ mod tests {
         assert!(matches!(orx.try_recv(), Ok(Out::Answer { callback_id, text }) if callback_id == "c" && text == "Too late, answered in the terminal"));
     }
 
+    fn ask_event(c: &mut Core, sid: &str) -> (std::sync::mpsc::Receiver<Reply>, u64) {
+        let mut r = raw("PreToolUse", sid);
+        r["tool_name"] = json!("AskUserQuestion");
+        r["tool_input"] = json!({"questions": [{"question": "Q?", "header": "H", "options": [{"label": "A"}, {"label": "B"}]}]});
+        let (rtx, rrx) = channel();
+        let (qtx, qrx) = channel();
+        c.handle(Msg::Event { raw: r, chain: vec![], reply: Some((rtx, qtx)), token: None }, 1);
+        (rrx, qrx.try_recv().unwrap())
+    }
+
+    fn away_core() -> (Core, Receiver<crate::telegram::Out>) {
+        let (otx, orx) = channel();
+        let mut c = Core::new(channel().0);
+        c.phone = crate::phone::Phone::with_out(otx);
+        c.phone.chat.store(7, Ordering::Relaxed);
+        c.set_away(true);
+        (c, orx)
+    }
+
+    #[test]
+    fn question_held_while_away_answers_hook() {
+        use crate::telegram::Out;
+        let (mut c, orx) = away_core();
+        let (rx, id) = ask_event(&mut c, "s");
+        assert!(c.phone.asks.contains_key(&id) && c.replies.contains_key(&id));
+        // A later event must not release the held question.
+        event(&mut c, "UserPromptSubmit", "t", false);
+        assert!(c.replies.contains_key(&id));
+        let Ok(Out::Send { tag, text, buttons, .. }) = orx.try_recv() else { panic!("no question") };
+        assert_eq!(tag.as_deref(), Some(format!("q:{id}:0").as_str()));
+        assert!(text.ends_with(" X
+H
+Q?"), "{text}");
+        assert_eq!(buttons, vec![("A".to_owned(), format!("q:{id}:0:0")), ("B".to_owned(), format!("q:{id}:0:1"))]);
+        assert!(orx.try_recv().is_err(), "no Waiting for you duplicate");
+        c.handle(Msg::Sent { message_id: 9, session_id: "s".into(), tag }, 1);
+        assert_eq!(c.phone.ask_msgs.get(&9), Some(&(id, 0)));
+        c.answer(id, Reply::Answer(json!({"Q?": "B"})));
+        assert!(matches!(rx.try_recv(), Ok(Reply::Answer(a)) if a == json!({"Q?": "B"})));
+    }
+
+    #[test]
+    fn away_off_releases_question() {
+        let (mut c, _orx) = away_core();
+        let (rx, id) = ask_event(&mut c, "s");
+        c.set_away(false);
+        assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)));
+        assert!(c.phone.asks.is_empty() && !c.replies.contains_key(&id));
+    }
+
+    #[test]
+    fn answer_after_release_is_too_late() {
+        use crate::telegram::{Incoming, Out};
+        let (mut c, orx) = away_core();
+        let (_rx, id) = ask_event(&mut c, "s");
+        c.set_away(false);
+        while orx.try_recv().is_ok() {}
+        c.handle(Msg::Phone(Incoming::Button { chat: 7, callback_id: "c".into(), data: format!("a:{id}"), date: i64::MAX }), 3);
+        assert!(matches!(orx.try_recv(), Ok(Out::Answer { text, .. }) if text == "Too late, answered in the terminal"));
+    }
+
+    #[test]
+    fn question_timeout_cleans_up() {
+        let (mut c, _orx) = away_core();
+        let (_rx, id) = ask_event(&mut c, "s");
+        c.handle(Msg::Timeout(id), 2);
+        assert!(c.phone.asks.is_empty() && c.replies.is_empty());
+        assert!(c.phone.timed_out.contains(&id));
+    }
+
     #[test]
     fn sent_for_ended_session_is_not_routable() {
         let mut c = Core::new(channel().0);
-        c.handle(Msg::Sent { message_id: 5, session_id: "gone".into() }, 1);
+        c.handle(Msg::Sent { message_id: 5, session_id: "gone".into(), tag: None }, 1);
         assert!(c.phone.sent.is_empty());
         event(&mut c, "PreToolUse", "s", false);
-        c.handle(Msg::Sent { message_id: 6, session_id: "s".into() }, 1);
+        c.handle(Msg::Sent { message_id: 6, session_id: "s".into(), tag: None }, 1);
         assert_eq!(c.phone.sent.get(&6).map(String::as_str), Some("s"));
     }
 

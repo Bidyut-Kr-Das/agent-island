@@ -24,7 +24,7 @@ pub enum Msg {
     /// From the Telegram poller.
     Phone(crate::telegram::Incoming),
     /// A session's message was sent to Telegram as `message_id`.
-    Sent { message_id: i64, session_id: String },
+    Sent { message_id: i64, session_id: String, tag: Option<String> },
 }
 
 /// Island wait for a card: normal, and while away.
