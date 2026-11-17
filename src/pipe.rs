@@ -1,7 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, GetLastError, HANDLE, HLOCAL, LocalFree};
+use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, GetLastError, HANDLE, HLOCAL, LocalFree, WIN32_ERROR};
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
@@ -15,6 +15,7 @@ use windows::core::{HSTRING, w};
 
 const ERROR_FILE_NOT_FOUND: i32 = 2;
 const ERROR_PIPE_BUSY: i32 = 231;
+const ERROR_NO_DATA: u32 = 232;
 
 pub fn pipe_name() -> String {
     // Test-only override so tests never touch a real island; debug builds only.
@@ -83,8 +84,9 @@ impl Server {
 
     pub fn accept(&mut self) -> io::Result<File> {
         let h = HANDLE(self.pending.as_raw_handle());
+        // ERROR_NO_DATA: the client connected, wrote and closed before this call. Its bytes stay readable.
         if let Err(e) = unsafe { ConnectNamedPipe(h, None) }
-            && unsafe { GetLastError() } != ERROR_PIPE_CONNECTED
+            && !matches!(unsafe { GetLastError() }, ERROR_PIPE_CONNECTED | WIN32_ERROR(ERROR_NO_DATA))
         {
             // Broken instance (e.g. client closed early): replace it so the next accept works.
             self.pending = create_instance(&self.name, false)?;
@@ -137,6 +139,19 @@ mod tests {
         BufReader::new(&f).read_line(&mut reply).unwrap();
         assert_eq!(reply, "pong\n");
         assert_eq!(t.join().unwrap(), "ping\n");
+    }
+
+    #[test]
+    fn client_that_wrote_and_closed_before_accept_is_still_read() {
+        let name = format!(r"\\.\pipe\ai-test-closed-{}", std::process::id());
+        let mut server = Server::create_first_named(&name).unwrap();
+        let (mut f, _) = connect_to(&name).unwrap();
+        f.write_all(b"early\n").unwrap();
+        drop(f);
+        let f = server.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(&f).read_line(&mut line).unwrap();
+        assert_eq!(line, "early\n");
     }
 
     #[test]
