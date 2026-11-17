@@ -59,7 +59,14 @@ impl Core {
                         }
                     });
                 }
+                // apply drops the session on SessionEnd, so take it first.
+                let ended = (ev.name == "SessionEnd").then(|| self.state.sessions.iter().find(|s| s.id == ev.session_id).cloned()).flatten();
                 let id = self.state.apply(&ev, procs::find_pids(&chain), now);
+                let s = ended.or_else(|| self.state.sessions.iter().find(|s| s.id == ev.session_id).cloned());
+                if let Some(s) = s {
+                    let card = id.and_then(|id| self.state.permissions.iter().find(|p| p.req_id == id));
+                    self.phone.on_event(&raw, &s, card);
+                }
                 // Dropping the Sender of a card the turn ended releases its waiting hook.
                 let perms = &self.state.permissions;
                 self.replies.retain(|id, _| perms.iter().any(|p| p.req_id == *id));
