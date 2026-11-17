@@ -149,6 +149,7 @@ impl Phone {
         }
         self.link = None;
         self.token = t;
+        self.renew(Instant::now());
         if !self.token.is_empty()
             && let Some(tx) = self.tx.clone()
         {
@@ -160,6 +161,12 @@ impl Phone {
         self.code = new_code();
         self.code_at = now;
         self.wrong = 0;
+    }
+
+    fn expire(&mut self, now: Instant) {
+        if now.saturating_duration_since(self.code_at) > CODE_TTL {
+            self.renew(now);
+        }
     }
 
     fn save_chat(&self, v: Value) {
@@ -174,7 +181,8 @@ impl Phone {
         self.save_chat(Value::Null);
     }
 
-    pub fn status(&self) -> PhoneStatus {
+    pub fn status(&mut self, now: Instant) -> PhoneStatus {
+        self.expire(now);
         if self.chat.load(Ordering::Relaxed) != 0 {
             PhoneStatus::Paired
         } else if self.token.is_empty() {
@@ -212,9 +220,7 @@ impl Phone {
         match m {
             Incoming::BotName(n) => self.bot = Some(n),
             Incoming::Text { chat, text, .. } if paired == 0 => {
-                if now.saturating_duration_since(self.code_at) > CODE_TTL {
-                    self.renew(now);
-                }
+                self.expire(now);
                 if text.trim() == self.code {
                     self.chat.store(chat, Ordering::Relaxed);
                     self.save_chat(chat.into());
@@ -447,6 +453,28 @@ mod tests {
         assert_eq!(p.wrong, 0);
         p.incoming(text(5, &old, None), &[], now);
         assert_eq!(p.chat.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn token_change_renews_code() {
+        let (mut p, _rx) = unpaired();
+        let old = p.code.clone();
+        p.wrong = 3;
+        p.set_token("t".into());
+        assert_ne!(p.code, old);
+        assert_eq!(p.wrong, 0);
+    }
+
+    #[test]
+    fn status_renews_expired_code() {
+        let (mut p, _rx) = unpaired();
+        p.set_token("t".into());
+        let old = p.code.clone();
+        let later = Instant::now() + std::time::Duration::from_secs(601);
+        let PhoneStatus::Pairing { code, .. } = p.status(later) else { panic!("not pairing") };
+        assert_ne!(code, old);
+        p.incoming(text(5, &code, None), &[], later);
+        assert_eq!(p.chat.load(Ordering::Relaxed), 5);
     }
 
     #[test]
