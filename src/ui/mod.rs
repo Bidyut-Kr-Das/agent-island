@@ -31,7 +31,7 @@ const EXIT_AFTER_EMPTY: Duration = Duration::from_secs(3);
 
 impl Core {
     pub fn new(tx: Sender<Msg>) -> Core {
-        Core { state: State::default(), replies: HashMap::new(), phone: Default::default(), empty_since: None, last_prune: None, tx }
+        Core { state: State::default(), replies: HashMap::new(), phone: crate::phone::Phone::new(tx.clone()), empty_since: None, last_prune: None, tx }
     }
 
     pub fn handle(&mut self, msg: Msg, now: u64) {
@@ -96,6 +96,10 @@ impl Core {
                 self.state.timeout(id);
             }
             Msg::Replay { session_id, todos } => self.state.set_todos(&session_id, todos),
+            Msg::Sent { message_id, session_id } => {
+                self.phone.sent.insert(message_id, session_id);
+            }
+            Msg::Phone(_) => {} // Task 8
         }
     }
 
@@ -134,6 +138,13 @@ fn parse_click(v: Option<&str>) -> Option<Reply> {
 static ECHOED: AtomicBool = AtomicBool::new(false);
 
 static CTX: OnceLock<egui::Context> = OnceLock::new();
+
+/// Repaints the UI from any thread; no-op before the window exists.
+pub(crate) fn wake() {
+    if let Some(c) = CTX.get() {
+        c.request_repaint();
+    }
+}
 
 /// Runs the island until every session is gone. Returns at once if another island owns the pipe.
 pub fn run() {

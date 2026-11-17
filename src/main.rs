@@ -11,6 +11,7 @@ mod server;
 mod procs;
 mod settings;
 mod state;
+mod telegram;
 mod ui;
 
 fn main() {

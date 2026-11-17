@@ -21,6 +21,10 @@ pub enum Msg {
     Timeout(u64),
     /// Todos rebuilt from a session's transcript by a worker thread.
     Replay { session_id: String, todos: Vec<crate::state::Todo> },
+    /// From the Telegram poller.
+    Phone(crate::telegram::Incoming),
+    /// A session's message was sent to Telegram as `message_id`.
+    Sent { message_id: i64, session_id: String },
 }
 
 /// Fails if another island already owns the pipe. While `paused` is set, gated commands skip the gate.
