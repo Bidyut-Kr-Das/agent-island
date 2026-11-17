@@ -179,6 +179,9 @@ impl State {
         let has_pending = self.permissions.iter().any(|p| p.session_id == sid && !p.timed_out);
         let s = &mut self.sessions[idx];
         s.changed_at = now;
+        if s.transcript.is_empty() {
+            s.transcript = ev.transcript_path.clone();
+        }
         if !ev.cwd.is_empty() && ev.cwd != s.cwd {
             s.cwd = ev.cwd.clone();
             (s.parent, s.project) = display_parts(&ev.cwd);

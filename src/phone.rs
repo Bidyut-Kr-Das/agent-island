@@ -17,6 +17,7 @@ impl Phone {
     /// Writes `text` as one JSON string line. A dead listener is dropped and false returned.
     pub fn deliver(&mut self, session_id: &str, text: &str) -> bool {
         let Some(mut f) = self.listeners.remove(session_id) else { return false };
+        // ponytail: blocking write on the UI thread; a hung helper with a full 4 KB pipe buffer stalls the island. Upgrade: write on a per-listener thread.
         let line = format!("{}\n", serde_json::to_string(text).unwrap_or_default());
         if f.write_all(line.as_bytes()).is_err() {
             return false;

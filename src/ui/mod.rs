@@ -41,7 +41,7 @@ impl Core {
                 if ev.name == "SessionEnd" {
                     self.phone.forget(&ev.session_id);
                 }
-                let known = self.state.sessions.iter().any(|s| s.id == ev.session_id);
+                let known = self.state.sessions.iter().any(|s| s.id == ev.session_id && !s.transcript.is_empty());
                 if !known && !ev.transcript_path.is_empty() && ev.name != "SessionEnd" {
                     // Rebuild todos on the worker thread; transcripts can be tens of MB.
                     // ponytail: the UI sees the result on its next frame, up to 3 s when idle; no wake here.
@@ -492,6 +492,20 @@ mod tests {
         drop(cli);
         assert!(!c.phone.deliver("s", "a"));
         assert!(!c.phone.deliver("s", "a"));
+    }
+
+    #[test]
+    fn replay_runs_once_after_listener_created_session() {
+        let (tx, rx) = channel();
+        let mut c = Core::new(tx);
+        let (srv, _cli) = pipe_pair("rp");
+        c.handle(Msg::Listen { session_id: "s".into(), cwd: "x".into(), chain: vec![], pipe: srv }, 1);
+        let mut r = raw("SessionStart", "s");
+        r["transcript_path"] = json!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/transcript.jsonl"));
+        c.handle(Msg::Event { raw: r.clone(), chain: vec![], reply: None }, 2);
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(2)), Ok(Msg::Replay { .. })));
+        c.handle(Msg::Event { raw: r, chain: vec![], reply: None }, 3);
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "second replay spawned");
     }
 
     #[test]
