@@ -84,7 +84,7 @@ fn spawn_island() {
 }
 
 /// The pipe, the server pid, and whether this call started the island.
-fn connect_retry(name: &str, spawn: bool) -> Option<(std::fs::File, u32, bool)> {
+pub(crate) fn connect_retry(name: &str, spawn: bool) -> Option<(std::fs::File, u32, bool)> {
     let mut spawned = false;
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {

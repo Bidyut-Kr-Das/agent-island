@@ -74,6 +74,18 @@ impl Core {
                     let ev = event::HookEvent { name: "SessionStart".into(), session_id: session_id.clone(), cwd, ..Default::default() };
                     self.state.apply(&ev, pids, now);
                 }
+                // Test hook, debug builds only: AGENT_ISLANDS_ECHO=<text> is sent to the first listener 2 s after it registers.
+                #[cfg(debug_assertions)]
+                if let Ok(text) = std::env::var("AGENT_ISLANDS_ECHO")
+                    && !ECHOED.swap(true, Ordering::Relaxed)
+                    && let Ok(mut f) = pipe.try_clone()
+                {
+                    std::thread::spawn(move || {
+                        use std::io::Write;
+                        std::thread::sleep(Duration::from_secs(2));
+                        let _ = writeln!(f, "{}", serde_json::to_string(&text).unwrap_or_default());
+                    });
+                }
                 self.phone.listen(session_id, pipe);
             }
             Msg::Timeout(id) => {
@@ -114,6 +126,9 @@ fn parse_click(v: Option<&str>) -> Option<Reply> {
         _ => None,
     }
 }
+
+#[cfg(debug_assertions)]
+static ECHOED: AtomicBool = AtomicBool::new(false);
 
 static CTX: OnceLock<egui::Context> = OnceLock::new();
 

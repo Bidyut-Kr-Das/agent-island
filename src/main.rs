@@ -4,6 +4,7 @@ mod event;
 mod focus;
 mod gate;
 mod hook;
+mod listen;
 mod phone;
 mod pipe;
 mod server;
@@ -22,6 +23,10 @@ fn main() {
     let _ = unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_APPLICATION_DIR) };
     if std::env::args().nth(1).as_deref() == Some("hook") {
         std::process::exit(hook::run());
+    }
+    if std::env::args().nth(1).as_deref() == Some("listen") {
+        let arg = |n| std::env::args().nth(n).unwrap_or_default();
+        std::process::exit(listen::run(&arg(2), &arg(3)));
     }
     ui::run();
 }
