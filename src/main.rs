@@ -4,6 +4,7 @@ mod event;
 mod focus;
 mod gate;
 mod hook;
+mod phone;
 mod pipe;
 mod server;
 mod procs;

@@ -14,6 +14,8 @@ pub enum Msg {
         chain: Vec<(u32, String)>,
         reply: Option<(Sender<Reply>, Sender<u64>)>,
     },
+    /// A `listen` helper: Core keeps `pipe` open and writes phone prompts to it.
+    Listen { session_id: String, cwd: String, chain: Vec<(u32, String)>, pipe: std::fs::File },
     Timeout(u64),
     /// Todos rebuilt from a session's transcript by a worker thread.
     Replay { session_id: String, todos: Vec<crate::state::Todo> },
@@ -43,8 +45,14 @@ fn serve(f: std::fs::File, tx: &Sender<Msg>, wake: &impl Fn(), paused: &AtomicBo
     let mut line = String::new();
     BufReader::new(&f).read_line(&mut line).ok()?;
     let mut v: Value = serde_json::from_str(&line).ok()?;
-    let mut raw = v["event"].take();
     let chain = serde_json::from_value(v["chain"].take()).unwrap_or_default();
+    if let Some(session_id) = v["listen"].as_str() {
+        let cwd = v["cwd"].as_str().unwrap_or_default().to_owned();
+        tx.send(Msg::Listen { session_id: session_id.to_owned(), cwd, chain, pipe: f }).ok()?;
+        wake();
+        return Some(());
+    }
+    let mut raw = v["event"].take();
     // The hook ran the command gate (spec 9a); only its envelope flag counts, never a field in the event.
     let mut gated = v["gated"] == true;
     // Gating paused: the hook stays silent at once and the command is plain activity, no card.
@@ -111,6 +119,13 @@ mod tests {
         let (mut c, _) = crate::pipe::connect_to(&name).unwrap();
         c.write_all(format!("{envelope}\n").as_bytes()).unwrap();
         (rx.recv_timeout(Duration::from_secs(3)).unwrap(), c)
+    }
+
+    #[test]
+    fn listen_envelope_hands_pipe_to_core() {
+        let (msg, _c) = send("listen", serde_json::json!({"listen": "s", "cwd": "x", "chain": []}));
+        let Msg::Listen { session_id, cwd, .. } = msg else { panic!() };
+        assert_eq!((session_id.as_str(), cwd.as_str()), ("s", "x"));
     }
 
     #[test]

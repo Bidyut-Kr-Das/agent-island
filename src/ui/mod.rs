@@ -20,6 +20,7 @@ use windows::Win32::Foundation::HWND;
 pub struct Core {
     pub state: State,
     pub replies: HashMap<u64, Sender<Reply>>,
+    pub phone: crate::phone::Phone,
     empty_since: Option<Instant>,
     last_prune: Option<Instant>,
     tx: Sender<Msg>,
@@ -30,13 +31,16 @@ const EXIT_AFTER_EMPTY: Duration = Duration::from_secs(3);
 
 impl Core {
     pub fn new(tx: Sender<Msg>) -> Core {
-        Core { state: State::default(), replies: HashMap::new(), empty_since: None, last_prune: None, tx }
+        Core { state: State::default(), replies: HashMap::new(), phone: Default::default(), empty_since: None, last_prune: None, tx }
     }
 
     pub fn handle(&mut self, msg: Msg, now: u64) {
         match msg {
             Msg::Event { raw, chain, reply } => {
                 let Some(ev) = event::parse(&raw) else { return };
+                if ev.name == "SessionEnd" {
+                    self.phone.forget(&ev.session_id);
+                }
                 let known = self.state.sessions.iter().any(|s| s.id == ev.session_id);
                 if !known && !ev.transcript_path.is_empty() && ev.name != "SessionEnd" {
                     // Rebuild todos on the worker thread; transcripts can be tens of MB.
@@ -60,6 +64,17 @@ impl Core {
                     self.replies.insert(id, reply);
                     let _ = req.send(id);
                 }
+            }
+            Msg::Listen { session_id, cwd, chain, pipe } => {
+                let pids = procs::find_pids(&chain);
+                if let Some(s) = self.state.sessions.iter_mut().find(|s| s.id == session_id) {
+                    s.claude_pid = pids.claude.or(s.claude_pid);
+                    s.terminal_pid = pids.terminal.or(s.terminal_pid);
+                } else {
+                    let ev = event::HookEvent { name: "SessionStart".into(), session_id: session_id.clone(), cwd, ..Default::default() };
+                    self.state.apply(&ev, pids, now);
+                }
+                self.phone.listen(session_id, pipe);
             }
             Msg::Timeout(id) => {
                 self.replies.remove(&id);
@@ -437,7 +452,56 @@ mod win {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+    use std::io::{BufRead, BufReader};
     use std::sync::mpsc::channel;
+
+    fn pipe_pair(tag: &str) -> (std::fs::File, std::fs::File) {
+        let name = format!(r"\\.\pipe\ai-test-core-{tag}-{}", std::process::id());
+        let mut server = crate::pipe::Server::create_first_named(&name).unwrap();
+        let t = std::thread::spawn(move || server.accept().unwrap());
+        let (cli, _) = crate::pipe::connect_to(&name).unwrap();
+        (t.join().unwrap(), cli)
+    }
+
+    #[test]
+    fn listen_for_unknown_session_creates_it() {
+        let mut c = Core::new(channel().0);
+        let (srv, _cli) = pipe_pair("lu");
+        c.handle(Msg::Listen { session_id: "s".into(), cwd: r"D:\p\x".into(), chain: vec![], pipe: srv }, 1);
+        assert_eq!(c.state.sessions.len(), 1);
+        assert_eq!(c.state.sessions[0].project, "X");
+    }
+
+    #[test]
+    fn deliver_encodes_multiline_as_one_json_line() {
+        let mut c = Core::new(channel().0);
+        let (srv, cli) = pipe_pair("ml");
+        c.handle(Msg::Listen { session_id: "s".into(), cwd: "x".into(), chain: vec![], pipe: srv }, 1);
+        let text = "line 1\nsay \"hi\" \\ 🟠";
+        assert!(c.phone.deliver("s", text));
+        let mut line = String::new();
+        BufReader::new(&cli).read_line(&mut line).unwrap();
+        assert_eq!(serde_json::from_str::<String>(line.trim_end()).unwrap(), text);
+    }
+
+    #[test]
+    fn deliver_to_closed_listener_fails_and_forgets() {
+        let mut c = Core::new(channel().0);
+        let (srv, cli) = pipe_pair("cl");
+        c.handle(Msg::Listen { session_id: "s".into(), cwd: "x".into(), chain: vec![], pipe: srv }, 1);
+        drop(cli);
+        assert!(!c.phone.deliver("s", "a"));
+        assert!(!c.phone.deliver("s", "a"));
+    }
+
+    #[test]
+    fn session_end_forgets_listener() {
+        let mut c = Core::new(channel().0);
+        let (srv, _cli) = pipe_pair("se");
+        c.handle(Msg::Listen { session_id: "s".into(), cwd: "x".into(), chain: vec![], pipe: srv }, 1);
+        c.handle(Msg::Event { raw: raw("SessionEnd", "s"), chain: vec![], reply: None }, 2);
+        assert!(!c.phone.deliver("s", "a"));
+    }
 
     fn raw(name: &str, sid: &str) -> Value {
         json!({"hook_event_name": name, "session_id": sid, "cwd": r"D:\p\x", "transcript_path": "t.jsonl", "tool_name": "Bash", "tool_input": {"command": "ls"}})
