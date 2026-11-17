@@ -4,7 +4,7 @@ use std::hash::{BuildHasher, RandomState};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -91,6 +91,8 @@ pub struct Phone {
     tx: Option<Sender<Msg>>,
     /// Paired Telegram chat; 0 = unpaired, sends are skipped. Shared with the link's sender thread.
     pub chat: Arc<AtomicI64>,
+    /// Away mode, shared with the pipe server: while unset, `on_event` sends nothing.
+    pub away: Arc<AtomicBool>,
     /// Telegram message id to the session it was sent for.
     pub sent: HashMap<i64, String>,
     /// Last text delivered per session, so its echo as a PC prompt is not sent back.
@@ -119,7 +121,7 @@ fn unix_now() -> i64 {
 impl Default for Phone {
     fn default() -> Phone {
         Phone {
-            listeners: HashMap::new(), token: String::new(), link: None, out: None, tx: None, chat: Arc::default(), sent: HashMap::new(),
+            listeners: HashMap::new(), token: String::new(), link: None, out: None, tx: None, chat: Arc::default(), away: Arc::default(), sent: HashMap::new(),
             delivered: HashMap::new(), code: new_code(), code_at: Instant::now(), wrong: 0, bot: None, held: None, timed_out: HashSet::new(), settings: None,
             started: unix_now(), told_stale: false,
         }
@@ -303,7 +305,7 @@ impl Phone {
     }
 
     pub fn on_event(&mut self, raw: &Value, s: &Session, card: Option<&Permission>) {
-        if self.chat.load(Ordering::Relaxed) == 0 {
+        if self.chat.load(Ordering::Relaxed) == 0 || !self.away.load(Ordering::Relaxed) {
             return;
         }
         if raw["hook_event_name"] == "UserPromptSubmit"
@@ -438,6 +440,7 @@ mod tests {
     #[test]
     fn phone_prompt_not_echoed() {
         let (mut p, rx) = paired();
+        p.away.store(true, Ordering::Relaxed);
         p.listen("s".into(), File::create("NUL").unwrap());
         assert!(p.deliver("s", "go"));
         let mut r = fx("UserPromptSubmit");
@@ -455,6 +458,21 @@ mod tests {
         p.chat.store(0, Ordering::Relaxed);
         p.on_event(&fx("SessionStart"), &sess(Status::Idle, vec![]), None);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn away_off_sends_nothing() {
+        let (mut p, rx) = paired();
+        p.on_event(&fx("SessionStart"), &sess(Status::Idle, vec![]), None);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn away_on_sends() {
+        let (mut p, rx) = paired();
+        p.away.store(true, Ordering::Relaxed);
+        p.on_event(&fx("SessionStart"), &sess(Status::Idle, vec![]), None);
+        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "🟠 X\nStarted"));
     }
 
     fn two() -> Vec<Session> {

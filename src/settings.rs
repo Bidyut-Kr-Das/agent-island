@@ -28,6 +28,11 @@ pub fn load_chat(path: &Path) -> Option<i64> {
     v["phone_chat"].as_i64()
 }
 
+/// Anything missing or unreadable is false.
+pub fn load_away(path: &Path) -> bool {
+    std::fs::read(path).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).is_some_and(|v| v["away"] == true)
+}
+
 /// Replaces one key and keeps the rest. Unreadable or non-object content starts from `{}`.
 pub fn set(path: &Path, key: &str, value: serde_json::Value) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
@@ -89,6 +94,20 @@ mod tests {
         assert_eq!(load_chat(&p), Some(42));
         set(&p, "phone_chat", serde_json::Value::Null).unwrap();
         assert_eq!(load_chat(&p), None);
+    }
+
+    #[test]
+    fn away_roundtrip_keeps_side_and_chat() {
+        let p = tmp("away");
+        assert!(!load_away(&p));
+        save_to(&p, Side::Right).unwrap();
+        set(&p, "phone_chat", serde_json::json!(42)).unwrap();
+        set(&p, "away", serde_json::json!(true)).unwrap();
+        assert_eq!((load_away(&p), load_from(&p), load_chat(&p)), (true, Side::Right, Some(42)));
+        set(&p, "away", serde_json::json!(false)).unwrap();
+        assert!(!load_away(&p));
+        std::fs::write(&p, "not json").unwrap();
+        assert!(!load_away(&p));
     }
 
     #[test]

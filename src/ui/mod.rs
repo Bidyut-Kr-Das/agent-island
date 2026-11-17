@@ -39,7 +39,11 @@ impl Core {
         match msg {
             Msg::Event { raw, chain, reply, token } => {
                 if let Some(t) = token {
+                    let empty = t.is_empty();
                     self.phone.set_token(t);
+                    if empty || self.phone.chat.load(Ordering::Relaxed) == 0 {
+                        self.set_away(false);
+                    }
                 }
                 let Some(ev) = event::parse(&raw) else { return };
                 if ev.name == "SessionEnd" {
@@ -129,6 +133,29 @@ impl Core {
         }
     }
 
+    /// Away can be on only while paired. Turning it off releases everything waiting.
+    pub fn set_away(&mut self, on: bool) {
+        if on && self.phone.chat.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let was = self.phone.away.swap(on, Ordering::Relaxed);
+        if let Some(p) = &self.phone.settings {
+            let _ = settings::set(p, "away", on.into());
+        }
+        if was && !on {
+            // Cards get a fresh 30 s island wait.
+            for tx in self.replies.values() {
+                let _ = tx.send(Reply::Rearm);
+            }
+            // Task 4: also remove every waiting question sender here, so the terminal dialog opens.
+        }
+    }
+
+    pub fn disconnect(&mut self) {
+        self.phone.disconnect();
+        self.set_away(false);
+    }
+
     pub fn answer(&mut self, req_id: u64, r: Reply) {
         if let Some(tx) = self.replies.remove(&req_id) {
             let _ = tx.send(r);
@@ -180,7 +207,6 @@ pub fn run() {
             c.request_repaint();
         }
     };
-    // Gating pause lives in memory only: every island start gates.
     let away = Arc::new(AtomicBool::new(false));
     if crate::server::spawn(tx.clone(), wake, away.clone()).is_err() {
         return;
@@ -208,6 +234,9 @@ pub fn run() {
             win::place(hwnd, side);
             let mut core = Core::new(tx.clone());
             core.phone.chat.store(settings::path().and_then(|p| settings::load_chat(&p)).unwrap_or(0), Ordering::Relaxed);
+            core.phone.away = away.clone();
+            // Away survives a restart only while still paired.
+            away.store(core.phone.chat.load(Ordering::Relaxed) != 0 && settings::path().is_some_and(|p| settings::load_away(&p)), Ordering::Relaxed);
             core.phone.settings = settings::path();
             theme::setup_fonts(&cc.egui_ctx);
             let _ = CTX.set(cc.egui_ctx.clone());
@@ -217,7 +246,7 @@ pub fn run() {
             #[cfg(not(debug_assertions))]
             let open_req = None;
             let app = App {
-                core, rx, hwnd, region: Vec::new(), trimmed: false, selected: None, open_req, was_down: false, side, settings_open: false, away, arming: None, press_at: f64::NEG_INFINITY,
+                core, rx, hwnd, region: Vec::new(), trimmed: false, selected: None, open_req, was_down: false, side, settings_open: false, arming: None, press_at: f64::NEG_INFINITY,
                 // Test hook, debug builds only: AGENT_ISLANDS_CLICK=allow|deny answers the first permission card 1 s after it shows.
                 #[cfg(debug_assertions)]
                 auto_click: parse_click(std::env::var("AGENT_ISLANDS_CLICK").ok().as_deref()),
@@ -247,8 +276,6 @@ struct App {
     was_down: bool,
     side: Side,
     settings_open: bool,
-    /// Shared with the pipe server: gated commands skip the gate while set.
-    away: Arc<AtomicBool>,
     /// Pointer history for the permission card on screen.
     arming: Option<views::Arming>,
     /// When the latest mouse press started (egui time).
@@ -298,7 +325,7 @@ impl eframe::App for App {
             View::Waiting(id) => Some(id.clone()),
             _ => self.selected.clone(),
         };
-        let pill = views::pill(ui, &self.core, marked.as_deref(), self.side, self.away.load(Ordering::Relaxed), t);
+        let pill = views::pill(ui, &self.core, marked.as_deref(), self.side, self.core.phone.away.load(Ordering::Relaxed), t);
         if pill.secondary_clicked() {
             self.settings_open = !self.settings_open;
         }
@@ -350,12 +377,12 @@ impl eframe::App for App {
                 (rect, 8.0)
             }
             View::Panel | View::Pill if self.settings_open => {
-                let (rect, clicked, gate, disconnect) = views::settings_card(ui, r, self.side, self.away.load(Ordering::Relaxed), matches!(phone, PhoneStatus::Paired));
+                let (rect, clicked, gate, disconnect) = views::settings_card(ui, r, self.side, self.core.phone.away.load(Ordering::Relaxed), matches!(phone, PhoneStatus::Paired));
                 if let Some(v) = gate {
-                    self.away.store(v, Ordering::Relaxed);
+                    self.core.set_away(v);
                 }
                 if disconnect {
-                    self.core.phone.disconnect();
+                    self.core.disconnect();
                 }
                 if let Some(side) = clicked {
                     if let Some(p) = settings::path() {
@@ -684,6 +711,54 @@ mod tests {
         c.handle(Msg::Timeout(id), 2);
         assert!(c.state.permissions[0].timed_out);
         assert!(c.replies.is_empty());
+    }
+
+    fn paired_core() -> Core {
+        let c = Core::new(channel().0);
+        c.phone.chat.store(7, Ordering::Relaxed);
+        c
+    }
+
+    #[test]
+    fn set_away_on_needs_pairing() {
+        let mut c = Core::new(channel().0);
+        c.set_away(true);
+        assert!(!c.phone.away.load(Ordering::Relaxed));
+        c.phone.chat.store(7, Ordering::Relaxed);
+        c.set_away(true);
+        assert!(c.phone.away.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn away_off_rearms_cards() {
+        let mut c = paired_core();
+        let (rx, _) = event(&mut c, "PermissionRequest", "s", true).unwrap();
+        c.set_away(true);
+        assert!(rx.try_recv().is_err());
+        c.set_away(false);
+        assert!(matches!(rx.try_recv(), Ok(Reply::Rearm)));
+        assert!(!c.state.permissions.is_empty(), "the card stays");
+    }
+
+    #[test]
+    fn disconnect_turns_away_off_and_releases() {
+        let mut c = paired_core();
+        let (rx, _) = event(&mut c, "PermissionRequest", "s", true).unwrap();
+        c.set_away(true);
+        c.disconnect();
+        assert!(!c.phone.away.load(Ordering::Relaxed));
+        assert_eq!(c.phone.chat.load(Ordering::Relaxed), 0);
+        assert!(matches!(rx.try_recv(), Ok(Reply::Rearm)));
+    }
+
+    #[test]
+    fn token_cleared_turns_away_off() {
+        let mut c = paired_core();
+        let (rx, _) = event(&mut c, "PermissionRequest", "s", true).unwrap();
+        c.set_away(true);
+        c.handle(Msg::Event { raw: raw("Stop", "t"), chain: vec![], reply: None, token: Some(String::new()) }, 2);
+        assert!(!c.phone.away.load(Ordering::Relaxed));
+        assert!(matches!(rx.try_recv(), Ok(Reply::Rearm)));
     }
 
     #[test]
