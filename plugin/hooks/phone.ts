@@ -19,7 +19,8 @@ export const register: Register = (on) => {
         for (const line of lines) {
           if (dead) break
           try {
-            void $.prompt.submit({ text: JSON.parse(line), asUser: true })
+            const t: unknown = JSON.parse(line)
+            if (typeof t === 'string') $.prompt.submit({ text: t, asUser: true }).catch(() => {})
           } catch {} // not a JSON line: ignore
         }
       }
