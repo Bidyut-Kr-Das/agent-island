@@ -32,12 +32,16 @@ pub fn message(raw: &Value, s: &Session, card: Option<&Permission>) -> Option<(S
         format!("Permission: {} {}", c.verb, c.detail)
     } else {
         match name {
-            "SessionStart" => "Started".to_owned(),
+            // Not `compact`: auto-compaction is not a new session.
+            "SessionStart" if matches!(raw["source"].as_str(), Some("startup" | "clear" | "resume")) => "Started".to_owned(),
             "SessionEnd" => "Ended".to_owned(),
             "UserPromptSubmit" => format!("You (PC): {}", raw["prompt"].as_str()?),
             "Stop" => {
                 let mut lines: Vec<String> = raw["last_assistant_message"].as_str().filter(|m| !m.is_empty()).map(str::to_owned).into_iter().collect();
                 lines.extend(s.todos.iter().map(|t| format!("{}{}", if t.status == TodoStatus::Completed { "[x] " } else { "[ ] " }, t.subject)));
+                if lines.is_empty() {
+                    return None;
+                }
                 lines.join("\n")
             }
             "StopFailure" => format!("Error: {}", ["error", "error_details"].iter().find_map(|k| raw[k].as_str()).unwrap_or("turn failed")),
@@ -46,7 +50,10 @@ pub fn message(raw: &Value, s: &Session, card: Option<&Permission>) -> Option<(S
                 if s.status == Status::Waiting(WaitKind::Other)
                     && !matches!(raw["notification_type"].as_str(), Some("permission_prompt" | "idle_prompt" | "agent_completed")) =>
             {
-                format!("Waiting for you: {}", raw["message"].as_str().unwrap_or(""))
+                match raw["message"].as_str().filter(|m| !m.is_empty()) {
+                    Some(m) => format!("Waiting for you: {m}"),
+                    None => "Waiting for you".to_owned(),
+                }
             }
             _ => return None,
         }
@@ -99,6 +106,14 @@ pub struct Phone {
     pub timed_out: HashSet<u64>,
     /// Settings file for `phone_chat`; None in tests.
     pub settings: Option<PathBuf>,
+    /// Unix seconds at island start: Telegram messages and button taps dated before it are ignored.
+    started: i64,
+    /// The "Not delivered" notice goes out once per island run.
+    told_stale: bool,
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
 impl Default for Phone {
@@ -106,6 +121,7 @@ impl Default for Phone {
         Phone {
             listeners: HashMap::new(), token: String::new(), link: None, out: None, tx: None, chat: Arc::default(), sent: HashMap::new(),
             delivered: HashMap::new(), code: new_code(), code_at: Instant::now(), wrong: 0, bot: None, held: None, timed_out: HashSet::new(), settings: None,
+            started: unix_now(), told_stale: false,
         }
     }
 }
@@ -216,6 +232,23 @@ impl Phone {
     /// Routes one Telegram update; Allow/Deny taps are returned for Core, which owns the pending replies.
     pub fn incoming(&mut self, m: Incoming, sessions: &[Session], now: Instant) -> Action {
         let paired = self.chat.load(Ordering::Relaxed);
+        // Updates from before this run (the island is closed while no session is open) must not act now.
+        match m {
+            Incoming::Text { chat, date, .. } if date < self.started => {
+                if paired != 0 && chat == paired && !self.told_stale {
+                    self.told_stale = true;
+                    self.say("Not delivered: sent while no session was open", vec![]);
+                }
+                return Action::None;
+            }
+            Incoming::Button { chat, callback_id, date, .. } if date < self.started => {
+                if paired != 0 && chat == paired {
+                    self.ack(callback_id, "Too late, answered in the terminal");
+                }
+                return Action::None;
+            }
+            _ => {}
+        }
         match m {
             Incoming::BotName(n) => self.bot = Some(n),
             Incoming::Text { chat, text, .. } if paired == 0 => {
@@ -231,7 +264,7 @@ impl Phone {
                     }
                 }
             }
-            Incoming::Text { chat, text, reply_to } if chat == paired => {
+            Incoming::Text { chat, text, reply_to, .. } if chat == paired => {
                 if let Some(sid) = reply_to.and_then(|r| self.sent.get(&r)).cloned() {
                     self.send_to(&sid, &text, sessions);
                 } else {
@@ -246,7 +279,7 @@ impl Phone {
                     }
                 }
             }
-            Incoming::Button { chat, callback_id, data } if paired != 0 && chat == paired => {
+            Incoming::Button { chat, callback_id, data, .. } if paired != 0 && chat == paired => {
                 let tap = data.split_once(':').and_then(|(k, id)| Some((match k { "a" => Reply::Allow, "d" => Reply::Deny, _ => return None }, id.parse().ok()?)));
                 if let Some((reply, id)) = tap {
                     return Action::Answer(id, reply, callback_id);
@@ -318,6 +351,31 @@ mod tests {
         r["prompt"] = json!("hi");
         assert_eq!(msg(&r).unwrap(), "🟠 X\nYou (PC): hi");
         assert_eq!(msg(&fx("SessionEnd")).unwrap(), "🟠 X\nEnded");
+    }
+
+    #[test]
+    fn started_only_for_startup_clear_resume() {
+        let mut r = fx("SessionStart");
+        for (src, sent) in [("startup", true), ("clear", true), ("resume", true), ("compact", false), ("other", false)] {
+            r["source"] = json!(src);
+            assert_eq!(msg(&r).is_some(), sent, "{src}");
+        }
+        r["source"] = json!(null);
+        assert!(msg(&r).is_none());
+    }
+
+    #[test]
+    fn empty_stop_and_bare_waiting() {
+        let mut r = fx("Stop");
+        r["last_assistant_message"] = json!("");
+        assert!(msg(&r).is_none(), "no text and no todos: nothing to send");
+        let mut n = fx("Notification-permission_prompt");
+        n["notification_type"] = json!("needs_input");
+        let s = sess(Status::Waiting(WaitKind::Other), vec![]);
+        n["message"] = json!(null);
+        assert_eq!(message(&n, &s, None).unwrap().0, "🟠 X\nWaiting for you");
+        n["message"] = json!("");
+        assert_eq!(message(&n, &s, None).unwrap().0, "🟠 X\nWaiting for you");
     }
 
     #[test]
@@ -408,7 +466,7 @@ mod tests {
     }
 
     fn text(chat: i64, t: &str, reply_to: Option<i64>) -> Incoming {
-        Incoming::Text { chat, text: t.into(), reply_to }
+        Incoming::Text { chat, text: t.into(), reply_to, date: i64::MAX }
     }
 
     fn unpaired() -> (Phone, std::sync::mpsc::Receiver<Out>) {
@@ -515,10 +573,38 @@ mod tests {
         let Ok(Out::Send { text: t, buttons, .. }) = rx.try_recv() else { panic!("no question") };
         assert_eq!(t, "Which session?");
         assert_eq!(buttons, vec![("🟠 X".to_owned(), "s:s".to_owned()), ("🔵 Y".to_owned(), "s:t".to_owned())]);
-        let b = Incoming::Button { chat: 7, callback_id: "c".into(), data: "s:t".into() };
+        let b = Incoming::Button { chat: 7, callback_id: "c".into(), data: "s:t".into(), date: i64::MAX };
         assert!(matches!(p.incoming(b, &two(), now), Action::None));
         assert!(matches!(rx.try_recv(), Ok(Out::Answer { callback_id, text }) if callback_id == "c" && text.is_empty()));
         assert_eq!(p.delivered.get("t").map(String::as_str), Some("go"));
+    }
+
+    #[test]
+    fn stale_text_is_dropped_with_one_notice_per_run() {
+        let (mut p, rx) = paired();
+        p.listen("s".into(), File::create("NUL").unwrap());
+        let old = |chat, t: &str| Incoming::Text { chat, text: t.into(), reply_to: None, date: 1 };
+        let one = [sess(Status::Idle, vec![])];
+        p.incoming(old(7, "old"), &one, Instant::now());
+        p.incoming(old(7, "older"), &one, Instant::now());
+        assert!(p.delivered.is_empty(), "nothing typed into the session");
+        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "Not delivered: sent while no session was open"));
+        assert!(rx.try_recv().is_err(), "notice only once");
+        p.incoming(old(6, "stranger"), &one, Instant::now());
+        assert!(rx.try_recv().is_err(), "strangers get no reply");
+        p.incoming(text(7, "now", None), &one, Instant::now());
+        assert_eq!(p.delivered.get("s").map(String::as_str), Some("now"));
+    }
+
+    #[test]
+    fn stale_button_is_answered_too_late() {
+        let (mut p, rx) = paired();
+        let b = |chat, data: &str, date| Incoming::Button { chat, callback_id: "c".into(), data: data.into(), date };
+        assert!(matches!(p.incoming(b(7, "a:1", 1), &[], Instant::now()), Action::None));
+        assert!(matches!(rx.try_recv(), Ok(Out::Answer { text, .. }) if text == "Too late, answered in the terminal"));
+        assert!(matches!(p.incoming(b(6, "a:1", 1), &[], Instant::now()), Action::None));
+        assert!(rx.try_recv().is_err(), "strangers are ignored");
+        assert!(matches!(p.incoming(b(7, "a:1", i64::MAX), &[], Instant::now()), Action::Answer(1, _, _)));
     }
 
     #[test]

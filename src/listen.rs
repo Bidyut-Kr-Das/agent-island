@@ -32,8 +32,14 @@ pub(crate) fn serve_lines(name: &str, sid: &str, cwd: &str, out: &mut impl Write
 }
 
 pub fn run(session_id: &str, cwd: &str) -> i32 {
-    let name = pipe::pipe_name();
-    while serve_lines(&name, session_id, cwd, &mut io::stdout(), true).is_ok() {
+    let parent = procs::ancestors(std::process::id()).get(1).map(|p| p.0);
+    run_named(&pipe::pipe_name(), session_id, cwd, parent)
+}
+
+/// Stops when `out` fails or, before each (re)connect, when the parent Claude Code process is gone:
+/// an orphan must not respawn the island forever.
+fn run_named(name: &str, session_id: &str, cwd: &str, parent: Option<u32>) -> i32 {
+    while parent.is_none_or(procs::is_alive) && serve_lines(name, session_id, cwd, &mut io::stdout(), true).is_ok() {
         std::thread::sleep(Duration::from_secs(1));
     }
     0
@@ -43,6 +49,15 @@ pub fn run(session_id: &str, cwd: &str) -> i32 {
 mod tests {
     use super::*;
     use crate::pipe::Server;
+
+    #[test]
+    fn dead_parent_ends_listen_without_connecting() {
+        let mut c = std::process::Command::new("cmd").args(["/c", "exit"]).spawn().unwrap();
+        let dead = c.id();
+        c.wait().unwrap();
+        // spawn=true would start an island if it connected; a dead parent returns first.
+        assert_eq!(run_named(r"\\.\pipe\ai-test-orphan-none", "s", "x", Some(dead)), 0);
+    }
 
     #[test]
     fn listen_prints_lines_and_reconnects() {

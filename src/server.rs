@@ -53,6 +53,9 @@ fn serve(f: std::fs::File, tx: &Sender<Msg>, wake: &impl Fn(), paused: &AtomicBo
     let mut v: Value = serde_json::from_str(&line).ok()?;
     let chain = serde_json::from_value(v["chain"].take()).unwrap_or_default();
     if let Some(session_id) = v["listen"].as_str() {
+        if session_id.is_empty() {
+            return None;
+        }
         let cwd = v["cwd"].as_str().unwrap_or_default().to_owned();
         tx.send(Msg::Listen { session_id: session_id.to_owned(), cwd, chain, pipe: f }).ok()?;
         wake();
@@ -133,6 +136,20 @@ mod tests {
         let (msg, _c) = send("listen", serde_json::json!({"listen": "s", "cwd": "x", "chain": []}));
         let Msg::Listen { session_id, cwd, .. } = msg else { panic!() };
         assert_eq!((session_id.as_str(), cwd.as_str()), ("s", "x"));
+    }
+
+    #[test]
+    fn listen_envelope_with_empty_id_is_ignored() {
+        let name = format!(r"\\.\pipe\ai-test-srv-emptyid-{}", std::process::id());
+        let mut server = Server::create_first_named(&name).unwrap();
+        let (tx, rx): (Sender<Msg>, Receiver<Msg>) = channel();
+        std::thread::spawn(move || {
+            let f = server.accept().unwrap();
+            let _ = serve(f, &tx, &|| {}, &AtomicBool::new(false));
+        });
+        let (mut c, _) = crate::pipe::connect_to(&name).unwrap();
+        c.write_all(b"{\"listen\": \"\", \"cwd\": \"x\", \"chain\": []}\n").unwrap();
+        assert!(rx.recv_timeout(Duration::from_millis(500)).is_err());
     }
 
     #[test]

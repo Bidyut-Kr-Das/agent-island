@@ -11,8 +11,10 @@ pub enum Out {
 }
 
 pub enum Incoming {
-    Text { chat: i64, text: String, reply_to: Option<i64> },
-    Button { chat: i64, callback_id: String, data: String },
+    /// `date` is the message's unix time in seconds.
+    Text { chat: i64, text: String, reply_to: Option<i64>, date: i64 },
+    /// `date` is that of the message carrying the button.
+    Button { chat: i64, callback_id: String, data: String, date: i64 },
     BotName(String),
 }
 
@@ -22,6 +24,7 @@ pub fn parse_update(u: &Value) -> Option<Incoming> {
             chat: m["chat"]["id"].as_i64()?,
             text: m["text"].as_str()?.to_owned(),
             reply_to: m["reply_to_message"]["message_id"].as_i64(),
+            date: m["date"].as_i64().unwrap_or(0),
         });
     }
     let q = u.get("callback_query")?;
@@ -29,6 +32,7 @@ pub fn parse_update(u: &Value) -> Option<Incoming> {
         chat: q["message"]["chat"]["id"].as_i64()?,
         callback_id: q["id"].as_str()?.to_owned(),
         data: q["data"].as_str()?.to_owned(),
+        date: q["message"]["date"].as_i64().unwrap_or(0),
     })
 }
 
@@ -146,14 +150,14 @@ mod tests {
 
     #[test]
     fn parse_reply_text() {
-        let u = json!({"update_id": 1, "message": {"message_id": 9, "chat": {"id": 5}, "text": "go", "reply_to_message": {"message_id": 3}}});
-        assert!(matches!(parse_update(&u), Some(Incoming::Text { chat: 5, ref text, reply_to: Some(3) }) if text == "go"));
+        let u = json!({"update_id": 1, "message": {"message_id": 9, "chat": {"id": 5}, "text": "go", "date": 1700, "reply_to_message": {"message_id": 3}}});
+        assert!(matches!(parse_update(&u), Some(Incoming::Text { chat: 5, ref text, reply_to: Some(3), date: 1700 }) if text == "go"));
     }
 
     #[test]
     fn parse_button() {
-        let u = json!({"update_id": 2, "callback_query": {"id": "q", "data": "a:4", "message": {"chat": {"id": 5}}}});
-        assert!(matches!(parse_update(&u), Some(Incoming::Button { chat: 5, .. })));
+        let u = json!({"update_id": 2, "callback_query": {"id": "q", "data": "a:4", "message": {"chat": {"id": 5}, "date": 1800}}});
+        assert!(matches!(parse_update(&u), Some(Incoming::Button { chat: 5, date: 1800, .. })));
     }
 
     #[test]

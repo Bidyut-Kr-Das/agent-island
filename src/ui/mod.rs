@@ -106,7 +106,10 @@ impl Core {
             }
             Msg::Replay { session_id, todos } => self.state.set_todos(&session_id, todos),
             Msg::Sent { message_id, session_id } => {
-                self.phone.sent.insert(message_id, session_id);
+                // An ended session's last message ("Ended") is not routable: a reply would show its uuid.
+                if self.state.sessions.iter().any(|s| s.id == session_id) {
+                    self.phone.sent.insert(message_id, session_id);
+                }
             }
             Msg::Phone(m) => {
                 if let crate::phone::Action::Answer(id, r, callback_id) = self.phone.incoming(m, &self.state.sessions, Instant::now()) {
@@ -693,7 +696,7 @@ mod tests {
         c.handle(Msg::Timeout(late), 2);
         while orx.try_recv().is_ok() {}
         let tap = |c: &mut Core, data: String| {
-            c.handle(Msg::Phone(Incoming::Button { chat: 7, callback_id: "c".into(), data }), 3);
+            c.handle(Msg::Phone(Incoming::Button { chat: 7, callback_id: "c".into(), data, date: i64::MAX }), 3);
             let Ok(Out::Answer { callback_id, text }) = orx.try_recv() else { panic!("no answer") };
             assert_eq!(callback_id, "c");
             assert!(orx.try_recv().is_err(), "exactly one answer");
@@ -704,6 +707,32 @@ mod tests {
         assert_eq!(tap(&mut c, format!("a:{id}")), "Already answered");
         assert_eq!(tap(&mut c, format!("a:{late}")), "Too late, answered in the terminal");
         assert_eq!(tap(&mut c, "a:999".into()), "Already answered");
+    }
+
+    #[test]
+    fn stale_dated_tap_never_answers_a_live_card() {
+        use crate::telegram::{Incoming, Out};
+        let (otx, orx) = channel();
+        let mut c = Core::new(channel().0);
+        c.phone = crate::phone::Phone::with_out(otx);
+        c.phone.chat.store(7, Ordering::Relaxed);
+        let (rx, id) = event(&mut c, "PermissionRequest", "s", true).unwrap();
+        while orx.try_recv().is_ok() {}
+        // A card of an earlier island run: its date is before this run started, whatever its req id.
+        c.handle(Msg::Phone(Incoming::Button { chat: 7, callback_id: "c".into(), data: format!("a:{id}"), date: 1 }), 3);
+        assert!(rx.try_recv().is_err(), "live card must stay pending");
+        assert!(c.replies.contains_key(&id));
+        assert!(matches!(orx.try_recv(), Ok(Out::Answer { callback_id, text }) if callback_id == "c" && text == "Too late, answered in the terminal"));
+    }
+
+    #[test]
+    fn sent_for_ended_session_is_not_routable() {
+        let mut c = Core::new(channel().0);
+        c.handle(Msg::Sent { message_id: 5, session_id: "gone".into() }, 1);
+        assert!(c.phone.sent.is_empty());
+        event(&mut c, "PreToolUse", "s", false);
+        c.handle(Msg::Sent { message_id: 6, session_id: "s".into() }, 1);
+        assert_eq!(c.phone.sent.get(&6).map(String::as_str), Some("s"));
     }
 
     #[test]
