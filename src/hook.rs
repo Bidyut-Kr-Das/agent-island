@@ -138,11 +138,13 @@ fn run_with(name: &str, spawn: bool, input: &str) -> Option<String> {
     let event: Value = serde_json::from_str(input).ok()?;
     let gated = event["hook_event_name"] == "PreToolUse"
         && gate::is_gated(event["tool_name"].as_str().unwrap_or_default(), event["tool_input"]["command"].as_str().unwrap_or_default());
-    let out = forward(name, spawn, event, gated);
+    let token = std::env::var("CLAUDE_PLUGIN_OPTION_TELEGRAM_BOT_TOKEN").ok();
+    let out = forward_with_token(name, spawn, event, gated, token.as_deref());
     if gated { Some(out.unwrap_or_else(|| pretool_output(None, false, false))) } else { out }
 }
 
-fn forward(name: &str, spawn: bool, event: Value, gated: bool) -> Option<String> {
+/// `token`: the Telegram bot token option; Some("") means the user turned the phone link off.
+fn forward_with_token(name: &str, spawn: bool, event: Value, gated: bool, token: Option<&str>) -> Option<String> {
     let (mut f, server_pid, spawned) = connect_retry(name, spawn)?;
     let verified = match (procs::exe_path(server_pid), std::env::current_exe()) {
         (Some(a), Ok(b)) => same_exe(&a, &b),
@@ -157,6 +159,9 @@ fn forward(name: &str, spawn: bool, event: Value, gated: bool) -> Option<String>
     let mut msg = json!({"event": event, "chain": chain});
     if gated {
         msg["gated"] = json!(true);
+    }
+    if let Some(t) = token {
+        msg["token"] = json!(t);
     }
     let mut line = msg.to_string();
     line.push('\n');
@@ -242,6 +247,19 @@ mod tests {
         assert_eq!(run_with(&name, false, r#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#), None);
         let sent: serde_json::Value = serde_json::from_str(&t.join().unwrap()).unwrap();
         assert_eq!(sent["chain"], json!([]));
+    }
+
+    #[test]
+    fn token_rides_in_envelope_when_set() {
+        let ev = json!({"hook_event_name":"PostToolUse","tool_name":"Bash"});
+        for (tag, token) in [("set", Some("")), ("unset", None)] {
+            let name = format!(r"\\.\pipe\ai-test-token-{tag}-{}", std::process::id());
+            let t = serve(&name, Some("{\"decision\":\"skip\"}\n"));
+            // gated: the hook waits for the reply, so the pipe stays open until the server read the line
+            assert_eq!(forward_with_token(&name, false, ev.clone(), true, token), Some(String::new()));
+            let sent: serde_json::Value = serde_json::from_str(&t.join().unwrap()).unwrap();
+            assert_eq!(sent.get("token").and_then(|v| v.as_str()), token);
+        }
     }
 
     #[test]

@@ -36,7 +36,10 @@ impl Core {
 
     pub fn handle(&mut self, msg: Msg, now: u64) {
         match msg {
-            Msg::Event { raw, chain, reply } => {
+            Msg::Event { raw, chain, reply, token } => {
+                if let Some(t) = token {
+                    self.phone.set_token(t);
+                }
                 let Some(ev) = event::parse(&raw) else { return };
                 if ev.name == "SessionEnd" {
                     self.phone.forget(&ev.session_id);
@@ -517,9 +520,9 @@ mod tests {
         c.handle(Msg::Listen { session_id: "s".into(), cwd: "x".into(), chain: vec![], pipe: srv }, 1);
         let mut r = raw("SessionStart", "s");
         r["transcript_path"] = json!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/transcript.jsonl"));
-        c.handle(Msg::Event { raw: r.clone(), chain: vec![], reply: None }, 2);
+        c.handle(Msg::Event { raw: r.clone(), chain: vec![], reply: None, token: None }, 2);
         assert!(matches!(rx.recv_timeout(Duration::from_secs(2)), Ok(Msg::Replay { .. })));
-        c.handle(Msg::Event { raw: r, chain: vec![], reply: None }, 3);
+        c.handle(Msg::Event { raw: r, chain: vec![], reply: None, token: None }, 3);
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "second replay spawned");
     }
 
@@ -528,7 +531,7 @@ mod tests {
         let mut c = Core::new(channel().0);
         let (srv, _cli) = pipe_pair("se");
         c.handle(Msg::Listen { session_id: "s".into(), cwd: "x".into(), chain: vec![], pipe: srv }, 1);
-        c.handle(Msg::Event { raw: raw("SessionEnd", "s"), chain: vec![], reply: None }, 2);
+        c.handle(Msg::Event { raw: raw("SessionEnd", "s"), chain: vec![], reply: None, token: None }, 2);
         assert!(!c.phone.deliver("s", "a"));
     }
 
@@ -543,8 +546,8 @@ mod tests {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/transcript.jsonl");
         let mut r = raw("SessionStart", "s");
         r["transcript_path"] = json!(path);
-        c.handle(Msg::Event { raw: r.clone(), chain: vec![], reply: None }, 1);
-        c.handle(Msg::Event { raw: r, chain: vec![], reply: None }, 2);
+        c.handle(Msg::Event { raw: r.clone(), chain: vec![], reply: None, token: None }, 1);
+        c.handle(Msg::Event { raw: r, chain: vec![], reply: None, token: None }, 2);
         let Ok(Msg::Replay { session_id, todos }) = rx.recv_timeout(Duration::from_secs(2)) else { panic!("no replay") };
         assert_eq!((session_id.as_str(), todos.len()), ("s", 2));
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "second replay spawned");
@@ -562,7 +565,7 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         let mut r = raw("SessionStart", "s");
         r["transcript_path"] = json!(path.to_str().unwrap());
-        c.handle(Msg::Event { raw: r, chain: vec![], reply: None }, 1);
+        c.handle(Msg::Event { raw: r, chain: vec![], reply: None, token: None }, 1);
         let got = rx.recv_timeout(Duration::from_secs(2));
         let _ = std::fs::remove_file(&path);
         let Ok(Msg::Replay { todos, .. }) = got else { panic!("no replay") };
@@ -575,7 +578,7 @@ mod tests {
         let mut c = Core::new(tx);
         let mut r = raw("SessionEnd", "s");
         r["transcript_path"] = json!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/transcript.jsonl"));
-        c.handle(Msg::Event { raw: r, chain: vec![], reply: None }, 1);
+        c.handle(Msg::Event { raw: r, chain: vec![], reply: None, token: None }, 1);
         assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "replay spawned for SessionEnd");
     }
 
@@ -583,7 +586,7 @@ mod tests {
         let (rtx, rrx) = channel();
         let (qtx, qrx) = channel();
         let reply = wants.then_some((rtx, qtx));
-        core.handle(Msg::Event { raw: raw(name, sid), chain: vec![], reply }, 1);
+        core.handle(Msg::Event { raw: raw(name, sid), chain: vec![], reply, token: None }, 1);
         wants.then(|| (rrx, qrx.try_recv().unwrap()))
     }
 
