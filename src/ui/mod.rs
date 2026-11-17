@@ -99,6 +99,7 @@ impl Core {
                 self.phone.listen(session_id, pipe);
             }
             Msg::Timeout(id) => {
+                self.phone.timed_out.insert(id);
                 self.replies.remove(&id);
                 self.state.timeout(id);
             }
@@ -106,7 +107,19 @@ impl Core {
             Msg::Sent { message_id, session_id } => {
                 self.phone.sent.insert(message_id, session_id);
             }
-            Msg::Phone(_) => {} // Task 8
+            Msg::Phone(m) => {
+                if let crate::phone::Action::Answer(id, r, callback_id) = self.phone.incoming(m, &self.state.sessions, Instant::now()) {
+                    let text = if self.replies.contains_key(&id) {
+                        self.answer(id, r);
+                        ""
+                    } else if self.phone.timed_out.contains(&id) {
+                        "Too late, answered in the terminal"
+                    } else {
+                        "Already answered"
+                    };
+                    self.phone.ack(callback_id, text);
+                }
+            }
         }
     }
 
@@ -658,6 +671,31 @@ mod tests {
         c.handle(Msg::Timeout(id), 2);
         assert!(c.state.permissions[0].timed_out);
         assert!(c.replies.is_empty());
+    }
+
+    #[test]
+    fn stale_button_taps() {
+        use crate::telegram::{Incoming, Out};
+        let (otx, orx) = channel();
+        let mut c = Core::new(channel().0);
+        c.phone = crate::phone::Phone::with_out(otx);
+        c.phone.chat.store(7, Ordering::Relaxed);
+        let (rx, id) = event(&mut c, "PermissionRequest", "s", true).unwrap();
+        let (_rx2, late) = event(&mut c, "PermissionRequest", "t", true).unwrap();
+        c.handle(Msg::Timeout(late), 2);
+        while orx.try_recv().is_ok() {}
+        let tap = |c: &mut Core, data: String| {
+            c.handle(Msg::Phone(Incoming::Button { chat: 7, callback_id: "c".into(), data }), 3);
+            let Ok(Out::Answer { callback_id, text }) = orx.try_recv() else { panic!("no answer") };
+            assert_eq!(callback_id, "c");
+            assert!(orx.try_recv().is_err(), "exactly one answer");
+            text
+        };
+        assert_eq!(tap(&mut c, format!("a:{id}")), "");
+        assert!(matches!(rx.try_recv(), Ok(Reply::Allow)));
+        assert_eq!(tap(&mut c, format!("a:{id}")), "Already answered");
+        assert_eq!(tap(&mut c, format!("a:{late}")), "Too late, answered in the terminal");
+        assert_eq!(tap(&mut c, "a:999".into()), "Already answered");
     }
 
     #[test]

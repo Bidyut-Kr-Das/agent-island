@@ -1,13 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
+use std::hash::{BuildHasher, RandomState};
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
 use serde_json::Value;
+use crate::hook::Reply;
 use crate::state::{Permission, Session, Status, TodoStatus, WaitKind};
-use crate::{server::Msg, telegram::{self, Link, Out}};
+use crate::{server::Msg, telegram::{self, Incoming, Link, Out}};
 
 pub fn circle(color: usize) -> &'static str {
     ["🟠", "🔵", "🟣", "🔴", "🟢", "⚫"][color % 6]
@@ -50,8 +54,25 @@ pub fn message(raw: &Value, s: &Session, card: Option<&Permission>) -> Option<(S
     Some((format!("{} {}\n{}", circle(s.color), s.project, telegram::cut(&body)), buttons))
 }
 
+pub enum Action {
+    None,
+    /// Allow/Deny tap (request id, reply, callback id): Core decides if it still applies and answers the tap.
+    Answer(u64, Reply, String),
+}
+
+pub enum PhoneStatus {
+    Off,
+    Pairing { code: String, bot: Option<String> },
+    Paired,
+}
+
+const CODE_TTL: Duration = Duration::from_secs(600);
+
+fn new_code() -> String {
+    format!("{:06}", RandomState::new().hash_one(0u8) % 1_000_000)
+}
+
 /// Phone link state: one open `listen` pipe per session, each line written is one phone prompt.
-#[derive(Default)]
 pub struct Phone {
     listeners: HashMap<String, File>,
     /// Telegram bot token; empty means the link is off. Never log it.
@@ -67,6 +88,26 @@ pub struct Phone {
     pub sent: HashMap<i64, String>,
     /// Last text delivered per session, so its echo as a PC prompt is not sent back.
     delivered: HashMap<String, String>,
+    /// Pairing code the chat must send, its age and the wrong guesses since.
+    pub code: String,
+    code_at: Instant,
+    wrong: u32,
+    pub bot: Option<String>,
+    /// Text waiting for a session pick.
+    held: Option<String>,
+    /// Permission ids whose hook gave up waiting.
+    pub timed_out: HashSet<u64>,
+    /// Settings file for `phone_chat`; None in tests.
+    pub settings: Option<PathBuf>,
+}
+
+impl Default for Phone {
+    fn default() -> Phone {
+        Phone {
+            listeners: HashMap::new(), token: String::new(), link: None, out: None, tx: None, chat: Arc::default(), sent: HashMap::new(),
+            delivered: HashMap::new(), code: new_code(), code_at: Instant::now(), wrong: 0, bot: None, held: None, timed_out: HashSet::new(), settings: None,
+        }
+    }
 }
 
 impl Phone {
@@ -113,6 +154,108 @@ impl Phone {
         {
             self.link = Some(telegram::start(self.token.clone(), self.chat.clone(), tx));
         }
+    }
+
+    fn renew(&mut self, now: Instant) {
+        self.code = new_code();
+        self.code_at = now;
+        self.wrong = 0;
+    }
+
+    fn save_chat(&self, v: Value) {
+        if let Some(p) = &self.settings {
+            let _ = crate::settings::set(p, "phone_chat", v);
+        }
+    }
+
+    pub fn disconnect(&mut self) {
+        self.chat.store(0, Ordering::Relaxed);
+        self.renew(Instant::now());
+        self.save_chat(Value::Null);
+    }
+
+    pub fn status(&self) -> PhoneStatus {
+        if self.chat.load(Ordering::Relaxed) != 0 {
+            PhoneStatus::Paired
+        } else if self.token.is_empty() {
+            PhoneStatus::Off
+        } else {
+            PhoneStatus::Pairing { code: self.code.clone(), bot: self.bot.clone() }
+        }
+    }
+
+    fn say(&self, text: impl Into<String>, buttons: Vec<(String, String)>) {
+        if let Some(out) = self.out() {
+            let _ = out.send(Out::Send { session_id: None, text: text.into(), buttons });
+        }
+    }
+
+    pub fn ack(&self, callback_id: String, text: &str) {
+        if let Some(out) = self.out() {
+            let _ = out.send(Out::Answer { callback_id, text: text.to_owned() });
+        }
+    }
+
+    fn send_to(&mut self, sid: &str, text: &str, sessions: &[Session]) {
+        let s = sessions.iter().find(|s| s.id == sid);
+        let name = s.map_or(sid, |s| s.project.as_str()).to_owned();
+        if !self.deliver(sid, text) {
+            self.say(format!("{name} can't receive messages right now"), vec![]);
+        } else if s.is_some_and(|s| s.status != Status::Idle) {
+            self.say(format!("Queued: {name} is busy"), vec![]);
+        }
+    }
+
+    /// Routes one Telegram update; Allow/Deny taps are returned for Core, which owns the pending replies.
+    pub fn incoming(&mut self, m: Incoming, sessions: &[Session], now: Instant) -> Action {
+        let paired = self.chat.load(Ordering::Relaxed);
+        match m {
+            Incoming::BotName(n) => self.bot = Some(n),
+            Incoming::Text { chat, text, .. } if paired == 0 => {
+                if now.saturating_duration_since(self.code_at) > CODE_TTL {
+                    self.renew(now);
+                }
+                if text.trim() == self.code {
+                    self.chat.store(chat, Ordering::Relaxed);
+                    self.save_chat(chat.into());
+                    self.say("Paired", vec![]);
+                } else {
+                    self.wrong += 1;
+                    if self.wrong >= 5 {
+                        self.renew(now);
+                    }
+                }
+            }
+            Incoming::Text { chat, text, reply_to } if chat == paired => {
+                if let Some(sid) = reply_to.and_then(|r| self.sent.get(&r)).cloned() {
+                    self.send_to(&sid, &text, sessions);
+                } else {
+                    match sessions {
+                        [] => self.say("No open sessions", vec![]),
+                        [s] => self.send_to(&s.id, &text, sessions),
+                        _ => {
+                            self.held = Some(text);
+                            let buttons = sessions.iter().map(|s| (format!("{} {}", circle(s.color), s.project), format!("s:{}", s.id))).collect();
+                            self.say("Which session?", buttons);
+                        }
+                    }
+                }
+            }
+            Incoming::Button { chat, callback_id, data } if paired != 0 && chat == paired => {
+                let tap = data.split_once(':').and_then(|(k, id)| Some((match k { "a" => Reply::Allow, "d" => Reply::Deny, _ => return None }, id.parse().ok()?)));
+                if let Some((reply, id)) = tap {
+                    return Action::Answer(id, reply, callback_id);
+                }
+                self.ack(callback_id, "");
+                if let Some(sid) = data.strip_prefix("s:")
+                    && let Some(text) = self.held.take()
+                {
+                    self.send_to(sid, &text, sessions);
+                }
+            }
+            _ => {}
+        }
+        Action::None
     }
 
     pub fn forget(&mut self, session_id: &str) {
@@ -249,5 +392,120 @@ mod tests {
         p.chat.store(0, Ordering::Relaxed);
         p.on_event(&fx("SessionStart"), &sess(Status::Idle, vec![]), None);
         assert!(rx.try_recv().is_err());
+    }
+
+    fn two() -> Vec<Session> {
+        let mut b = sess(Status::Idle, vec![]);
+        b.id = "t".into();
+        b.project = "Y".into();
+        b.color = 1;
+        vec![sess(Status::Idle, vec![]), b]
+    }
+
+    fn text(chat: i64, t: &str, reply_to: Option<i64>) -> Incoming {
+        Incoming::Text { chat, text: t.into(), reply_to }
+    }
+
+    fn unpaired() -> (Phone, std::sync::mpsc::Receiver<Out>) {
+        let (p, rx) = paired();
+        p.chat.store(0, Ordering::Relaxed);
+        (p, rx)
+    }
+
+    #[test]
+    fn exact_code_pairs() {
+        let (mut p, rx) = unpaired();
+        let now = Instant::now();
+        let code = p.code.clone();
+        p.incoming(text(5, "nope", None), &[], now);
+        assert_eq!(p.chat.load(Ordering::Relaxed), 0);
+        p.incoming(text(5, &format!(" {code}
+"), None), &[], now);
+        assert_eq!(p.chat.load(Ordering::Relaxed), 5);
+        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "Paired"));
+    }
+
+    #[test]
+    fn stranger_is_ignored() {
+        let (mut p, rx) = paired();
+        p.chat.store(5, Ordering::Relaxed);
+        p.listen("s".into(), File::create("NUL").unwrap());
+        p.incoming(text(6, "hi", None), &[sess(Status::Idle, vec![])], Instant::now());
+        assert!(rx.try_recv().is_err());
+        assert!(p.delivered.is_empty());
+    }
+
+    #[test]
+    fn five_wrong_codes_renew() {
+        let (mut p, _rx) = unpaired();
+        let now = Instant::now();
+        let old = p.code.clone();
+        for _ in 0..5 {
+            p.incoming(text(5, "x", None), &[], now);
+        }
+        assert_ne!(p.code, old);
+        assert_eq!(p.wrong, 0);
+        p.incoming(text(5, &old, None), &[], now);
+        assert_eq!(p.chat.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn code_expires_after_10_min() {
+        let (mut p, _rx) = unpaired();
+        let old = p.code.clone();
+        p.incoming(text(5, &old, None), &[], Instant::now() + std::time::Duration::from_secs(601));
+        assert_eq!(p.chat.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn reply_routes_to_session() {
+        let (mut p, _rx) = paired();
+        p.listen("s".into(), File::create("NUL").unwrap());
+        p.listen("t".into(), File::create("NUL").unwrap());
+        p.sent.insert(3, "s".into());
+        p.incoming(text(7, "go", Some(3)), &two(), Instant::now());
+        assert_eq!(p.delivered.get("s").map(String::as_str), Some("go"));
+        assert!(!p.delivered.contains_key("t"));
+    }
+
+    #[test]
+    fn single_session_takes_plain_text() {
+        let (mut p, rx) = paired();
+        p.listen("s".into(), File::create("NUL").unwrap());
+        p.incoming(text(7, "go", None), &[sess(Status::Idle, vec![])], Instant::now());
+        assert_eq!(p.delivered.get("s").map(String::as_str), Some("go"));
+        assert!(rx.try_recv().is_err());
+        p.incoming(text(7, "go", None), &[], Instant::now());
+        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "No open sessions"));
+    }
+
+    #[test]
+    fn several_sessions_ask_which() {
+        let (mut p, rx) = paired();
+        p.listen("t".into(), File::create("NUL").unwrap());
+        let now = Instant::now();
+        p.incoming(text(7, "go", None), &two(), now);
+        let Ok(Out::Send { text: t, buttons, .. }) = rx.try_recv() else { panic!("no question") };
+        assert_eq!(t, "Which session?");
+        assert_eq!(buttons, vec![("🟠 X".to_owned(), "s:s".to_owned()), ("🔵 Y".to_owned(), "s:t".to_owned())]);
+        let b = Incoming::Button { chat: 7, callback_id: "c".into(), data: "s:t".into() };
+        assert!(matches!(p.incoming(b, &two(), now), Action::None));
+        assert!(matches!(rx.try_recv(), Ok(Out::Answer { callback_id, text }) if callback_id == "c" && text.is_empty()));
+        assert_eq!(p.delivered.get("t").map(String::as_str), Some("go"));
+    }
+
+    #[test]
+    fn no_listener_says_cant_receive() {
+        let (mut p, rx) = paired();
+        p.incoming(text(7, "go", None), &[sess(Status::Idle, vec![])], Instant::now());
+        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "X can't receive messages right now"));
+    }
+
+    #[test]
+    fn busy_session_says_queued() {
+        let (mut p, rx) = paired();
+        p.listen("s".into(), File::create("NUL").unwrap());
+        p.incoming(text(7, "go", None), &[sess(Status::Working, vec![])], Instant::now());
+        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "Queued: X is busy"));
     }
 }
