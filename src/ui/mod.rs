@@ -143,7 +143,9 @@ impl Core {
                     } else {
                         "Already answered"
                     };
-                    self.phone.ack(callback_id, text);
+                    if let Some(callback_id) = callback_id {
+                        self.phone.ack(callback_id, text);
+                    }
                 }
             }
         }

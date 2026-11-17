@@ -115,6 +115,12 @@ fn poll(agent: &ureq::Agent, token: &str, tx: &Sender<Msg>, stop: &AtomicBool) {
     }
 }
 
+/// Allow/Deny share one row; longer button lists get one button per row so labels stay readable.
+fn keyboard(buttons: &[(String, String)]) -> Vec<Vec<Value>> {
+    let all: Vec<Value> = buttons.iter().map(|(l, d)| json!({"text": l, "callback_data": d})).collect();
+    if all.len() > 2 { all.into_iter().map(|b| vec![b]).collect() } else { vec![all] }
+}
+
 fn send_loop(agent: &ureq::Agent, token: &str, chat: &AtomicI64, tx: &Sender<Msg>, rx: Receiver<Out>) {
     // Ends when the Link (the only Sender) is dropped.
     for o in rx {
@@ -126,8 +132,7 @@ fn send_loop(agent: &ureq::Agent, token: &str, chat: &AtomicI64, tx: &Sender<Msg
                 }
                 let mut b = json!({"chat_id": id, "text": cut(&text)});
                 if !buttons.is_empty() {
-                    let row: Vec<Value> = buttons.iter().map(|(l, d)| json!({"text": l, "callback_data": d})).collect();
-                    b["reply_markup"] = json!({"inline_keyboard": [row]});
+                    b["reply_markup"] = json!({"inline_keyboard": keyboard(&buttons)});
                 }
                 ("sendMessage", b, session_id, tag)
             }
@@ -152,6 +157,13 @@ mod tests {
     fn parse_reply_text() {
         let u = json!({"update_id": 1, "message": {"message_id": 9, "chat": {"id": 5}, "text": "go", "date": 1700, "reply_to_message": {"message_id": 3}}});
         assert!(matches!(parse_update(&u), Some(Incoming::Text { chat: 5, ref text, reply_to: Some(3), date: 1700 }) if text == "go"));
+    }
+
+    #[test]
+    fn keyboard_rows() {
+        let b = |n: usize| (0..n).map(|i| (i.to_string(), format!("d{i}"))).collect::<Vec<_>>();
+        assert_eq!(keyboard(&b(2)).len(), 1);
+        assert_eq!(keyboard(&b(3)).iter().map(Vec::len).collect::<Vec<_>>(), vec![1, 1, 1]);
     }
 
     #[test]

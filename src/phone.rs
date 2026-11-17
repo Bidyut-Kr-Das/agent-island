@@ -62,7 +62,6 @@ pub fn message(raw: &Value, s: &Session, card: Option<&Permission>) -> Option<(S
 }
 
 /// A held AskUserQuestion waiting for phone answers.
-#[allow(dead_code)] // answers and picks are filled by the answer flow (Task 5)
 pub struct Ask {
     session_id: String,
     questions: Vec<Value>,
@@ -73,8 +72,8 @@ pub struct Ask {
 
 pub enum Action {
     None,
-    /// Allow/Deny tap (request id, reply, callback id): Core decides if it still applies and answers the tap.
-    Answer(u64, Reply, String),
+    /// An answer (request id, reply, callback id of the tap; None for typed text): Core decides if it still applies and acks the tap.
+    Answer(u64, Reply, Option<String>),
 }
 
 pub enum PhoneStatus {
@@ -280,8 +279,24 @@ impl Phone {
                 }
             }
             Incoming::Text { chat, text, reply_to, .. } if chat == paired => {
-                if let Some(sid) = reply_to.and_then(|r| self.sent.get(&r)).cloned() {
+                if let Some(&(id, qi)) = reply_to.and_then(|r| self.ask_msgs.get(&r)) {
+                    if self.asks.get(&id).is_some_and(|a| a.current == qi) {
+                        return self.record(id, text, sessions).map_or(Action::None, |r| Action::Answer(id, r, None));
+                    }
+                    self.say(self.gone(id), vec![]);
+                } else if let Some(sid) = reply_to.and_then(|r| self.sent.get(&r)).cloned() {
                     self.send_to(&sid, &text, sessions);
+                } else if let Some(waiting) = self.waiting(sessions) {
+                    if let [(id, _)] = waiting[..] {
+                        return self.record(id, text, sessions).map_or(Action::None, |r| Action::Answer(id, r, None));
+                    }
+                    let buttons = waiting.iter().filter_map(|&(id, qi)| {
+                        let a = &self.asks[&id];
+                        let s = sessions.iter().find(|s| s.id == a.session_id)?;
+                        Some((format!("{} {}: {}", circle(s.color), s.project, a.questions[qi]["header"].as_str().unwrap_or_default()), format!("w:{id}:{qi}")))
+                    }).collect();
+                    self.held = Some(text);
+                    self.say("Which question?", buttons);
                 } else {
                     match sessions {
                         [] => self.say("No open sessions", vec![]),
@@ -297,7 +312,13 @@ impl Phone {
             Incoming::Button { chat, callback_id, data, .. } if paired != 0 && chat == paired => {
                 let tap = data.split_once(':').and_then(|(k, id)| Some((match k { "a" => Reply::Allow, "d" => Reply::Deny, _ => return None }, id.parse().ok()?)));
                 if let Some((reply, id)) = tap {
-                    return Action::Answer(id, reply, callback_id);
+                    return Action::Answer(id, reply, Some(callback_id));
+                }
+                if let Some(rest) = data.strip_prefix("q:") {
+                    return self.tap(rest, callback_id, sessions);
+                }
+                if let Some(rest) = data.strip_prefix("w:") {
+                    return self.pick_question(rest, callback_id, sessions);
                 }
                 self.ack(callback_id, "");
                 if let Some(sid) = data.strip_prefix("s:")
@@ -309,6 +330,93 @@ impl Phone {
             _ => {}
         }
         Action::None
+    }
+
+    /// Why a tap or reply for a question that is no longer held does nothing.
+    fn gone(&self, id: u64) -> String {
+        if self.timed_out.contains(&id) { "Too late, answered in the terminal" } else { "Already answered" }.to_owned()
+    }
+
+    /// The (ask id, question index) each held ask is showing now, oldest first; None when nothing waits.
+    fn waiting(&self, sessions: &[Session]) -> Option<Vec<(u64, usize)>> {
+        let mut w: Vec<(u64, usize)> = self.asks.iter().filter(|(_, a)| sessions.iter().any(|s| s.id == a.session_id)).map(|(&id, a)| (id, a.current)).collect();
+        w.sort();
+        (!w.is_empty()).then_some(w)
+    }
+
+    /// Stores `text` as the answer to ask `id`'s current question, then sends the next one; the finished reply when none is left.
+    fn record(&mut self, id: u64, text: String, sessions: &[Session]) -> Option<Reply> {
+        let a = self.asks.get_mut(&id)?;
+        let key = a.questions[a.current]["question"].as_str().unwrap_or_default().to_owned();
+        a.answers.insert(key, Value::String(text));
+        a.picks.clear();
+        a.current += 1;
+        if a.current < a.questions.len() {
+            if let Some(s) = sessions.iter().find(|s| s.id == a.session_id) {
+                self.send_question(id, s);
+            }
+            return None;
+        }
+        // ask_msgs stays so a late reply to its messages is not typed into the session.
+        let a = self.asks.remove(&id)?;
+        Some(Reply::Answer(Value::Object(a.answers)))
+    }
+
+    /// A `w:<id>:<qi>` tap: the held text answers that question.
+    fn pick_question(&mut self, rest: &str, callback_id: String, sessions: &[Session]) -> Action {
+        let mut it = rest.split(':');
+        if let (Some(Ok(id)), Some(Ok(qi)), Some(text)) = (it.next().map(str::parse::<u64>), it.next().map(str::parse::<usize>), self.held.take()) {
+            if !self.asks.get(&id).is_some_and(|a| a.current == qi) {
+                self.ack(callback_id, &self.gone(id));
+                return Action::None;
+            }
+            if let Some(r) = self.record(id, text, sessions) {
+                return Action::Answer(id, r, Some(callback_id));
+            }
+        }
+        self.ack(callback_id, "");
+        Action::None
+    }
+
+    /// A `q:<id>:<qi>:<oi|done>` tap (the part after `q:`).
+    fn tap(&mut self, rest: &str, callback_id: String, sessions: &[Session]) -> Action {
+        let mut it = rest.split(':');
+        let (Some(Ok(id)), Some(Ok(qi)), Some(which)) = (it.next().map(str::parse::<u64>), it.next().map(str::parse::<usize>), it.next()) else {
+            self.ack(callback_id, "");
+            return Action::None;
+        };
+        let Some(a) = self.asks.get_mut(&id).filter(|a| a.current == qi) else {
+            self.ack(callback_id, &self.gone(id));
+            return Action::None;
+        };
+        let q = &a.questions[qi];
+        let labels: Vec<String> = q["options"].as_array().into_iter().flatten().map(|o| o["label"].as_str().unwrap_or_default().to_owned()).collect();
+        let multi = q["multiSelect"] == true;
+        let oi = which.parse::<usize>().ok().filter(|&i| i < labels.len());
+        if multi && let Some(oi) = oi {
+            match a.picks.iter().position(|p| *p == labels[oi]) {
+                Some(i) => { a.picks.remove(i); }
+                None => a.picks.push(labels[oi].clone()),
+            }
+        }
+        // Picks are shown and joined in option order.
+        let picked = labels.iter().filter(|l| a.picks.contains(l)).cloned().collect::<Vec<_>>().join(", ");
+        let answer = match (multi, which, oi) {
+            (true, "done", _) if !picked.is_empty() => picked,
+            (false, _, Some(oi)) => labels[oi].clone(),
+            _ => {
+                let text = if multi { format!("Picked: {picked}") } else { String::new() };
+                self.ack(callback_id, &text);
+                return Action::None;
+            }
+        };
+        match self.record(id, answer, sessions) {
+            Some(r) => Action::Answer(id, r, Some(callback_id)),
+            None => {
+                self.ack(callback_id, "");
+                Action::None
+            }
+        }
     }
 
     pub fn forget(&mut self, session_id: &str) {
@@ -354,7 +462,6 @@ impl Phone {
     pub fn drop_ask(&mut self, id: u64) {
         self.timed_out.insert(id);
         self.asks.remove(&id);
-        self.ask_msgs.retain(|_, (i, _)| *i != id);
     }
 
     pub fn on_event(&mut self, raw: &Value, s: &Session, card: Option<&Permission>) {
@@ -691,5 +798,134 @@ mod tests {
         p.listen("s".into(), File::create("NUL").unwrap());
         p.incoming(text(7, "go", None), &[sess(Status::Working, vec![])], Instant::now());
         assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "Queued: X is busy"));
+    }
+
+    fn q(question: &str, header: &str, labels: &[&str], multi: bool) -> Value {
+        json!({"question": question, "header": header, "multiSelect": multi, "options": labels.iter().map(|l| json!({"label": l})).collect::<Vec<_>>()})
+    }
+
+    fn tap(p: &mut Phone, data: &str) -> Action {
+        p.incoming(Incoming::Button { chat: 7, callback_id: "c".into(), data: data.into(), date: i64::MAX }, &two(), Instant::now())
+    }
+
+    /// Holds a question set for session `s` and registers each sent message as id 100 + question index.
+    fn held(p: &mut Phone, rx: &std::sync::mpsc::Receiver<Out>, id: u64, qs: Vec<Value>) {
+        p.away.store(true, Ordering::Relaxed);
+        p.ask(id, &sess(Status::Idle, vec![]), qs);
+        note(p, rx);
+    }
+
+    fn note(p: &mut Phone, rx: &std::sync::mpsc::Receiver<Out>) {
+        while let Ok(Out::Send { tag, .. }) = rx.try_recv() {
+            p.note_sent(100 + tag.as_deref().and_then(|t| t.rsplit(':').next()).and_then(|n| n.parse::<i64>().ok()).unwrap(), tag.as_deref());
+        }
+    }
+
+    fn ack_text(rx: &std::sync::mpsc::Receiver<Out>) -> String {
+        match rx.try_recv() { Ok(Out::Answer { text, .. }) => text, _ => panic!("no ack") }
+    }
+
+    #[test]
+    fn question_message_text_and_buttons() {
+        let (mut p, rx) = paired();
+        p.away.store(true, Ordering::Relaxed);
+        p.ask(4, &sess(Status::Idle, vec![]), vec![q("Which?", "Pick", &["A", "B"], true)]);
+        let Ok(Out::Send { text, buttons, tag, .. }) = rx.try_recv() else { panic!("no question") };
+        assert_eq!(text, "🟠 X
+Pick
+Which?");
+        assert_eq!(buttons, vec![("A".to_owned(), "q:4:0:0".to_owned()), ("B".to_owned(), "q:4:0:1".to_owned()), ("Done".to_owned(), "q:4:0:done".to_owned())]);
+        assert_eq!(tag.as_deref(), Some("q:4:0"));
+    }
+
+    #[test]
+    fn single_select_tap_answers() {
+        let (mut p, rx) = paired();
+        held(&mut p, &rx, 4, vec![q("Which?", "Pick", &["A", "B"], false)]);
+        let Action::Answer(4, Reply::Answer(a), Some(cb)) = tap(&mut p, "q:4:0:1") else { panic!("no answer") };
+        assert_eq!((a, cb), (json!({"Which?": "B"}), "c".to_owned()));
+        assert!(p.asks.is_empty());
+        assert!(matches!(tap(&mut p, "q:4:0:1"), Action::None));
+        assert_eq!(ack_text(&rx), "Already answered");
+    }
+
+    #[test]
+    fn multi_select_toggles_and_done() {
+        let (mut p, rx) = paired();
+        held(&mut p, &rx, 4, vec![q("Which?", "Pick", &["A", "B", "C"], true)]);
+        assert!(matches!(tap(&mut p, "q:4:0:0"), Action::None));
+        assert_eq!(ack_text(&rx), "Picked: A");
+        tap(&mut p, "q:4:0:2");
+        assert_eq!(ack_text(&rx), "Picked: A, C");
+        tap(&mut p, "q:4:0:1");
+        tap(&mut p, "q:4:0:1");
+        assert_eq!((ack_text(&rx), ack_text(&rx)), ("Picked: A, B, C".to_owned(), "Picked: A, C".to_owned()));
+        let Action::Answer(4, Reply::Answer(a), Some(_)) = tap(&mut p, "q:4:0:done") else { panic!("no answer") };
+        assert_eq!(a, json!({"Which?": "A, C"}));
+    }
+
+    #[test]
+    fn done_with_nothing_picked_waits() {
+        let (mut p, rx) = paired();
+        held(&mut p, &rx, 4, vec![q("Which?", "Pick", &["A", "B"], true)]);
+        assert!(matches!(tap(&mut p, "q:4:0:done"), Action::None));
+        assert_eq!(ack_text(&rx), "Picked: ");
+        assert!(p.asks.contains_key(&4));
+    }
+
+    #[test]
+    fn reply_text_is_other_answer() {
+        let (mut p, rx) = paired();
+        held(&mut p, &rx, 4, vec![q("Which?", "Pick", &["A", "B"], false)]);
+        let a = p.incoming(text(7, "my own", Some(100)), &two(), Instant::now());
+        let Action::Answer(4, Reply::Answer(a), None) = a else { panic!("no answer") };
+        assert_eq!(a, json!({"Which?": "my own"}));
+        // A late reply to the answered question is not typed into the session.
+        p.incoming(text(7, "again", Some(100)), &two(), Instant::now());
+        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "Already answered"));
+    }
+
+    #[test]
+    fn plain_text_answers_only_waiting_question() {
+        let (mut p, rx) = paired();
+        held(&mut p, &rx, 4, vec![q("Which?", "Pick", &["A", "B"], false)]);
+        let a = p.incoming(text(7, "free", None), &two(), Instant::now());
+        assert!(matches!(a, Action::Answer(4, Reply::Answer(ref v), None) if *v == json!({"Which?": "free"})));
+    }
+
+    #[test]
+    fn two_waiting_questions_ask_which() {
+        let (mut p, rx) = paired();
+        held(&mut p, &rx, 4, vec![q("Q1?", "H1", &["A"], false)]);
+        let mut t = sess(Status::Idle, vec![]);
+        t.id = "t".into();
+        t.project = "Y".into();
+        t.color = 1;
+        p.ask(5, &t, vec![q("Q2?", "H2", &["B"], false)]);
+        note(&mut p, &rx);
+        assert!(matches!(p.incoming(text(7, "free", None), &two(), Instant::now()), Action::None));
+        let Ok(Out::Send { text: t, buttons, .. }) = rx.try_recv() else { panic!("no prompt") };
+        assert_eq!(t, "Which question?");
+        assert_eq!(buttons, vec![("🟠 X: H1".to_owned(), "w:4:0".to_owned()), ("🔵 Y: H2".to_owned(), "w:5:0".to_owned())]);
+        let a = tap(&mut p, "w:5:0");
+        assert!(matches!(a, Action::Answer(5, Reply::Answer(ref v), Some(_)) if *v == json!({"Q2?": "free"})));
+        assert!(p.asks.contains_key(&4));
+    }
+
+    #[test]
+    fn two_questions_answer_in_order() {
+        let (mut p, rx) = paired();
+        held(&mut p, &rx, 4, vec![q("Q1?", "H1", &["A", "B"], true), q("Q2?", "H2", &["C", "D"], false)]);
+        assert!(rx.try_recv().is_err(), "second question waits for the first answer");
+        tap(&mut p, "q:4:0:1");
+        assert_eq!(ack_text(&rx), "Picked: B");
+        assert!(matches!(tap(&mut p, "q:4:0:done"), Action::None));
+        let Ok(Out::Send { text, tag, .. }) = rx.try_recv() else { panic!("no second question") };
+        assert_eq!((text.as_str(), tag.as_deref()), ("🟠 X
+H2
+Q2?", Some("q:4:1")));
+        assert_eq!(ack_text(&rx), "");
+        let Action::Answer(4, Reply::Answer(a), Some(_)) = tap(&mut p, "q:4:1:0") else { panic!("no answer") };
+        assert_eq!(a, json!({"Q1?": "B", "Q2?": "C"}));
     }
 }
