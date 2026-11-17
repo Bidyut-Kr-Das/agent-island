@@ -304,12 +304,13 @@ pub fn inside(p: Pos2, pill: Rect, panel: Rect) -> bool {
 }
 
 /// Window region in physical px: `[left, top, right, bottom, corner diameter]` for the pill and each
-/// shown shape beside it as (rect, corner radius), skipping empty ones.
+/// shown shape beside it as (rect, corner radius), skipping empty ones. Each shape grows by 2 logical px so the
+/// antialiased edge stroke stays inside the (unantialiased) GDI region.
 pub fn region(pill: Rect, others: &[(Rect, f32)], ppp: f32) -> Vec<[i32; 5]> {
     let px = |v: f32| (v * ppp).round() as i32;
     let pill = (pill.height() >= 1.0).then_some((pill, pill.width() / 2.0));
     let others = others.iter().copied().filter(|(r, _)| r.is_positive());
-    pill.into_iter().chain(others).map(|(r, rad)| [px(r.left()), px(r.top()), px(r.right()), px(r.bottom()), px(2.0 * rad)]).collect()
+    pill.into_iter().chain(others).map(|(r, rad)| [px(r.left() - 2.0), px(r.top() - 2.0), px(r.right() + 2.0), px(r.bottom() + 2.0), px(2.0 * (rad + 2.0))]).collect()
 }
 
 /// Index of the blob whose BLOB-sized box contains `p.y`.
@@ -563,44 +564,127 @@ pub fn label_rect(pill: Rect, i: usize, size: Vec2, side: Side) -> Rect {
     Rect::from_min_size(pos2(beside(pill, size.x, side), blob_top(pill, i) + BLOB / 2.0 - size.y / 2.0), size)
 }
 
-fn settings_h(paired: bool) -> f32 {
-    15.0 + 20.0 + 12.0 + 28.0 + 12.0 + 28.0 + 15.0 + if paired { 12.0 + 28.0 } else { 0.0 }
+const SET_W: f32 = 264.0;
+const SET_PAD: f32 = 16.0;
+const SET_ROW: f32 = 30.0;
+const AWAY_ROW: f32 = 34.0;
+const SEG_W: [f32; 2] = [46.0, 52.0];
+const LINK_W: f32 = 64.0;
+const TRACK: Color32 = Color32::from_rgb(0x12, 0x13, 0x17);
+const SEG_ON: Color32 = Color32::from_rgb(0x2e, 0x30, 0x38);
+const LINK_RED: Color32 = Color32::from_rgb(0xff, 0x6b, 0x6b);
+
+fn has_phone(phone: &PhoneStatus) -> bool {
+    !matches!(phone, PhoneStatus::Off)
 }
 
-/// Settings card beside the pill, top-aligned with it: the title, a "Side" row of Left / Right buttons
-/// and a "Gating" row of On / Paused buttons. Returns its rect, the side and the paused value clicked this frame.
-pub fn settings_card(ui: &mut egui::Ui, pill: Rect, side: Side, paused: bool, paired: bool) -> (Rect, Option<Side>, Option<bool>, bool) {
-    let p = ui.painter().clone();
-    let h = settings_h(paired);
-    let r = Rect::from_min_size(pos2(beside(pill, CARD_W, side), pill.top().min(WIN_H - MARGIN - h).max(MARGIN)), vec2(CARD_W, h));
-    p.add(Shadow { offset: [0, 12], blur: 32, spread: 0, color: Color32::from_black_alpha(128) }.as_shape(r, 8.0));
-    p.rect(r, 8.0, BG, Stroke::new(1.0, LINE), StrokeKind::Inside);
-    let (x, mut y) = (r.left() + 17.0, r.top() + 15.0);
-    let title = layout(&p, &[("Settings", fmt(14.0, "geist", FG))], f32::INFINITY, 1);
-    p.galley(pos2(x, y + 10.0 - title.size().y / 2.0), title, FG);
-    // One row: a label and two buttons; returns the index clicked.
-    let row = |y: f32, label: &str, names: &[&str], on: usize| {
-        let g = layout(&p, &[(label, fmt(12.5, "geist", FG2))], f32::INFINITY, 1);
-        p.galley(pos2(x, y + 14.0 - g.size().y / 2.0), g, FG2);
-        let mut clicked = None;
-        for (k, name) in names.iter().enumerate() {
-            let b = Rect::from_min_size(pos2(r.right() - 17.0 - 136.0 + k as f32 * 72.0, y), vec2(64.0, 28.0));
-            let fill = if k == on { Color32::from_white_alpha(26) } else { BTN_BG };
-            p.rect(b, 4.0, fill, Stroke::new(1.0, LINE), StrokeKind::Inside);
-            let g = layout(&p, &[(name, fmt(12.5, "geist", FG))], 64.0, 1);
-            p.galley(b.center() - g.size() / 2.0, g, FG);
-            if ui.interact(b, Id::unique((label, *name)), Sense::click()).clicked() {
-                clicked = Some(k);
-            }
+pub fn settings_h(phone: &PhoneStatus) -> f32 {
+    let top = 14.0 + 16.0 + 12.0 + SET_ROW + 14.0;
+    top + if has_phone(phone) { 8.0 + AWAY_ROW + 10.0 + 1.0 + 10.0 + SET_ROW } else { 0.0 }
+}
+
+/// Every control's rect, so alignment can be tested without drawing.
+pub struct SettingsLayout {
+    pub title: Pos2,
+    pub side_track: Rect,
+    pub side_segs: [Rect; 2],
+    pub away_row: Option<Rect>,
+    pub away_switch: Option<Rect>,
+    pub away_enabled: bool,
+    pub divider_y: Option<f32>,
+    pub phone_row: Option<Rect>,
+    pub disconnect: Option<Rect>,
+}
+
+pub fn settings_layout(card: Rect, phone: &PhoneStatus) -> SettingsLayout {
+    let (l, r) = (card.left() + SET_PAD, card.right() - SET_PAD);
+    let mut y = card.top() + 14.0;
+    let title = pos2(l, y);
+    y += 16.0 + 12.0;
+    let w = SEG_W[0] + SEG_W[1] + 6.0;
+    let track = Rect::from_min_size(pos2(r - w, y + (SET_ROW - 28.0) / 2.0), vec2(w, 28.0));
+    let x0 = track.left() + 3.0;
+    let seg = |x: f32, w: f32| Rect::from_min_size(pos2(x, track.top() + 3.0), vec2(w, 22.0));
+    let side_segs = [seg(x0, SEG_W[0]), seg(x0 + SEG_W[0], SEG_W[1])];
+    let mut out = SettingsLayout { title, side_track: track, side_segs, away_row: None, away_switch: None, away_enabled: false, divider_y: None, phone_row: None, disconnect: None };
+    if has_phone(phone) {
+        y += SET_ROW + 8.0;
+        out.away_row = Some(Rect::from_min_max(pos2(l, y), pos2(r, y + AWAY_ROW)));
+        out.away_switch = Some(Rect::from_min_size(pos2(r - 34.0, y + (AWAY_ROW - 20.0) / 2.0), vec2(34.0, 20.0)));
+        out.away_enabled = matches!(phone, PhoneStatus::Paired);
+        y += AWAY_ROW + 10.0;
+        out.divider_y = Some(y);
+        y += 1.0 + 10.0;
+        out.phone_row = Some(Rect::from_min_max(pos2(l, y), pos2(r, y + SET_ROW)));
+        if out.away_enabled {
+            out.disconnect = Some(Rect::from_min_size(pos2(r - LINK_W, y), vec2(LINK_W, SET_ROW)));
         }
-        clicked
+    }
+    out
+}
+
+/// Settings card beside the pill, top-aligned with it (mockup A): Side segmented control, Away switch,
+/// Phone status. Returns its rect, the side clicked, the away value clicked and whether Disconnect was clicked.
+pub fn settings_card(ui: &mut egui::Ui, pill: Rect, side: Side, away: bool, phone: &PhoneStatus) -> (Rect, Option<Side>, Option<bool>, bool) {
+    let p = ui.painter().clone();
+    let h = settings_h(phone);
+    let r = Rect::from_min_size(pos2(beside(pill, SET_W, side), pill.top().min(WIN_H - MARGIN - h).max(MARGIN)), vec2(SET_W, h));
+    let lay = settings_layout(r, phone);
+    p.add(Shadow { offset: [0, 12], blur: 32, spread: 0, color: Color32::from_black_alpha(128) }.as_shape(r, 10.0));
+    p.rect(r, 10.0, BG, Stroke::new(1.0, Color32::from_white_alpha(31)), StrokeKind::Inside);
+    // Text vertically centred on `y`.
+    let text = |x: f32, y: f32, s: &str, size: f32, c: Color32| {
+        let g = layout(&p, &[(s, fmt(size, "geist", c))], f32::INFINITY, 1);
+        let w = g.size().x;
+        p.galley(pos2(x, y - g.size().y / 2.0), g, c);
+        w
     };
-    y += 20.0 + 12.0;
-    let side_click = row(y, "Side", &["Left", "Right"], usize::from(side == Side::Right));
-    y += 28.0 + 12.0;
-    let gate_click = row(y, "Gating", &["On", "Paused"], usize::from(paused));
-    let disconnect = paired && row(y + 28.0 + 12.0, "Phone", &["Disconnect"], usize::MAX).is_some();
-    (r, side_click.map(|k| if k == 0 { Side::Left } else { Side::Right }), gate_click.map(|k| k == 1), disconnect)
+    text(lay.title.x, lay.title.y + 8.0, "Settings", 13.0, FG);
+    text(lay.title.x, lay.side_track.center().y, "Side", 12.5, FG2);
+    p.rect(lay.side_track, 14.0, TRACK, Stroke::new(1.0, Color32::from_white_alpha(20)), StrokeKind::Inside);
+    let mut side_click = None;
+    for (k, (seg, name)) in lay.side_segs.iter().zip(["Left", "Right"]).enumerate() {
+        let on = (k == 1) == (side == Side::Right);
+        if on {
+            p.rect(*seg, 11.0, SEG_ON, Stroke::new(1.0, Color32::from_white_alpha(26)), StrokeKind::Inside);
+        }
+        let c = if on { FG } else { FG3 };
+        let g = layout(&p, &[(name, fmt(12.0, "geist", c))], f32::INFINITY, 1);
+        p.galley(seg.center() - g.size() / 2.0, g, c);
+        if ui.interact(*seg, Id::unique(("side", k)), Sense::click()).clicked() {
+            side_click = Some(if k == 0 { Side::Left } else { Side::Right });
+        }
+    }
+    let (mut away_click, mut disconnect) = (None, false);
+    if let (Some(row), Some(sw)) = (lay.away_row, lay.away_switch) {
+        let k = if lay.away_enabled { 1.0 } else { 0.4 };
+        let dim = |c: Color32| c.linear_multiply(k);
+        text(row.left(), row.top() + 8.0, "Away", 12.5, dim(FG2));
+        let sub = if lay.away_enabled { "Send everything to Telegram" } else { "Pair a phone first" };
+        text(row.left(), row.bottom() - 7.0, sub, 11.0, dim(FG3));
+        let on = away && lay.away_enabled;
+        p.rect_filled(sw, 10.0, dim(if on { WARN } else { SEG_ON }));
+        let knob_x = if on { sw.right() - 2.0 - 8.0 } else { sw.left() + 2.0 + 8.0 };
+        p.circle_filled(pos2(knob_x, sw.center().y), 8.0, dim(if on { BG } else { FG2 }));
+        if lay.away_enabled && ui.interact(sw, Id::unique("away"), Sense::click()).clicked() {
+            away_click = Some(!away);
+        }
+    }
+    if let (Some(y), Some(row)) = (lay.divider_y, lay.phone_row) {
+        p.hline(r.left()..=r.right(), y + 0.5, Stroke::new(1.0, Color32::from_white_alpha(18)));
+        let mut x = row.left();
+        if lay.away_enabled {
+            p.circle_filled(pos2(x + 3.5, row.center().y), 3.5, OK);
+            x += 7.0 + 6.0;
+        }
+        text(x, row.center().y, if lay.away_enabled { "Phone paired" } else { "Not paired" }, 12.5, FG2);
+        if let Some(link) = lay.disconnect {
+            let g = layout(&p, &[("Disconnect", fmt(12.0, "geist", LINK_RED))], f32::INFINITY, 1);
+            p.galley(pos2(link.right() - g.size().x, link.center().y - g.size().y / 2.0), g, LINK_RED);
+            disconnect = ui.interact(link, Id::unique("disconnect"), Sense::click()).clicked();
+        }
+    }
+    (r, side_click, away_click, disconnect)
 }
 
 #[cfg(test)]
@@ -661,10 +745,56 @@ mod tests {
         assert_eq!(panel_rows(&s, &PhoneStatus::Paired).len(), 1);
     }
 
+    fn pairing() -> PhoneStatus {
+        PhoneStatus::Pairing { code: "482913".into(), bot: None }
+    }
+
     #[test]
-    fn settings_card_height_grows_only_when_paired() {
-        assert_eq!(settings_h(false), 15.0 + 20.0 + 12.0 + 28.0 + 12.0 + 28.0 + 15.0);
-        assert_eq!(settings_h(true), settings_h(false) + 12.0 + 28.0);
+    fn settings_rows_by_phone_status() {
+        let card = |p: &PhoneStatus| settings_layout(Rect::from_min_size(pos2(0.0, 0.0), vec2(SET_W, settings_h(p))), p);
+        let off = card(&PhoneStatus::Off);
+        assert!(off.away_row.is_none() && off.divider_y.is_none() && off.phone_row.is_none());
+        for p in [pairing(), PhoneStatus::Paired] {
+            let l = card(&p);
+            assert!(l.away_row.is_some() && l.divider_y.is_some() && l.phone_row.is_some());
+            assert!(l.phone_row.unwrap().bottom() + 14.0 <= settings_h(&p), "bottom padding");
+        }
+        assert!(settings_h(&PhoneStatus::Off) < settings_h(&PhoneStatus::Paired));
+        assert!(card(&pairing()).disconnect.is_none() && card(&PhoneStatus::Paired).disconnect.is_some());
+    }
+
+    #[test]
+    fn controls_right_aligned() {
+        let c = Rect::from_min_size(pos2(50.0, 8.0), vec2(SET_W, settings_h(&PhoneStatus::Paired)));
+        let l = settings_layout(c, &PhoneStatus::Paired);
+        let want = c.right() - 16.0;
+        assert_eq!(l.side_track.right(), want, "segmented control");
+        assert_eq!(l.side_segs[1].right() + 3.0, want);
+        assert_eq!(l.away_switch.unwrap().right(), want, "switch");
+        assert_eq!(l.disconnect.unwrap().right(), want, "disconnect");
+        assert_eq!(l.title.x, c.left() + 16.0);
+    }
+
+    #[test]
+    fn away_switch_disabled_unless_paired() {
+        let c = Rect::from_min_size(pos2(0.0, 0.0), vec2(SET_W, 200.0));
+        assert!(!settings_layout(c, &pairing()).away_enabled);
+        assert!(settings_layout(c, &PhoneStatus::Paired).away_enabled);
+        assert!(settings_layout(c, &PhoneStatus::Off).away_switch.is_none());
+    }
+
+    #[test]
+    fn switch_centred_in_away_row() {
+        let c = Rect::from_min_size(pos2(0.0, 0.0), vec2(SET_W, settings_h(&PhoneStatus::Paired)));
+        let l = settings_layout(c, &PhoneStatus::Paired);
+        assert_eq!(l.away_switch.unwrap().center().y, l.away_row.unwrap().center().y);
+        assert_eq!(l.side_track.center().y, c.top() + 14.0 + 16.0 + 12.0 + SET_ROW / 2.0);
+    }
+
+    #[test]
+    fn region_pads_shapes_by_2px() {
+        let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 100.0));
+        assert_eq!(region(pill, &[], 1.0)[0], [6, 6, 44, 110, 2 * (17 + 2)]);
     }
 
     fn sess_with(status: Status, todos: Vec<Todo>) -> Session {
@@ -738,7 +868,7 @@ mod tests {
     #[test]
     fn region_pill_only_is_one_capsule_in_pixels() {
         let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 100.0));
-        assert_eq!(region(pill, &[(Rect::NOTHING, 8.0)], 1.25), vec![[10, 10, 53, 135, 43]]);
+        assert_eq!(region(pill, &[(Rect::NOTHING, 8.0)], 1.25), vec![[8, 8, 55, 138, 48]]);
         assert_eq!(region(Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 0.0)), &[], 1.0), Vec::<[i32; 5]>::new(), "no sessions: empty");
     }
 
@@ -746,7 +876,7 @@ mod tests {
     fn region_pill_and_panel() {
         let pill = Rect::from_min_size(pos2(8.0, 8.0), vec2(34.0, 100.0));
         let panel = panel_rect(pill, 200.0, Side::Left);
-        assert_eq!(region(pill, &[(panel, 8.0)], 1.0), vec![[8, 8, 42, 108, 34], [50, 8, 350, 208, 16]]);
+        assert_eq!(region(pill, &[(panel, 8.0)], 1.0), vec![[6, 6, 44, 110, 38], [48, 6, 352, 210, 20]]);
     }
 
     #[test]
@@ -756,8 +886,8 @@ mod tests {
         let label = label_rect(pill, 1, vec2(120.0, 30.0), Side::Left);
         let r = region(pill, &[(card, 8.0), (label, 15.0)], 2.0);
         assert_eq!(r.len(), 3);
-        assert_eq!(r[1], [100, 38, 660, 338, 32]);
-        assert_eq!(r[2], [100, 92, 340, 152, 60], "capsule label");
+        assert_eq!(r[1], [96, 34, 664, 342, 40]);
+        assert_eq!(r[2], [96, 88, 344, 156, 68], "capsule label");
     }
 
     #[test]

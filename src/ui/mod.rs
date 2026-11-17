@@ -5,7 +5,6 @@ mod views;
 use blob::BlobState;
 use views::View;
 
-use crate::phone::PhoneStatus;
 use crate::server::Msg;
 use crate::settings::{self, Side};
 use crate::{event, hook::Reply, procs, state::State};
@@ -400,8 +399,8 @@ impl eframe::App for App {
                 (rect, 8.0)
             }
             View::Panel | View::Pill if self.settings_open => {
-                let (rect, clicked, gate, disconnect) = views::settings_card(ui, r, self.side, self.core.phone.away.load(Ordering::Relaxed), matches!(phone, PhoneStatus::Paired));
-                if let Some(v) = gate {
+                let (rect, clicked, away, disconnect) = views::settings_card(ui, r, self.side, self.core.phone.away.load(Ordering::Relaxed), &phone);
+                if let Some(v) = away {
                     self.core.set_away(v);
                 }
                 if disconnect {
@@ -414,7 +413,7 @@ impl eframe::App for App {
                     self.side = side;
                     win::place(self.hwnd, side);
                 }
-                (rect, 8.0)
+                (rect, 10.0)
             }
             View::Panel | View::Pill => {
                 let (panel, go) = views::panel(ui, &self.core, &phone, &mut self.selected, r, self.side, t);
