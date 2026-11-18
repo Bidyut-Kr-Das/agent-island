@@ -80,7 +80,7 @@ What arrives on the phone is one new message per event. The first line is a colo
 - **Started.**
 - `You (PC): <prompt>` when you send a prompt at the PC.
 - `Permission: ...` with Allow and Deny buttons.
-- The final answer and todo list, when Claude stops.
+- The final answer and todo list, when Claude stops. Markdown in the answer shows as Telegram formatting. Tables show as code blocks, and links to local files show as their label.
 - `Error: ...`
 - `Waiting for you: ...`
 - **Ended.**
@@ -91,6 +91,7 @@ Replies:
 
 - Reply to a session's message to send your text to that session as a prompt.
 - A message that is not a reply goes to the only open session. If more than one is open, the bot asks `Which session?`.
+- When the session starts on your message, the bot says `Working on it`, even with Away off.
 - If the session is busy, your reply runs after the current turn, and the bot says `Queued: <name> is busy`.
 - Messages sent while no session is open are not delivered. The bot says so once.
 - Permission cards still time out after 30 seconds. When you are away, turn on Away (see Away mode below).

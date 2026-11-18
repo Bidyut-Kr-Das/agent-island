@@ -17,10 +17,13 @@ pub fn circle(color: usize) -> &'static str {
     ["🟠", "🔵", "🟣", "🔴", "🟢", "⚫"][color % 6]
 }
 
-/// The phone message for a hook event (`s` is the session after the event was applied), with its inline buttons.
-pub fn message(raw: &Value, s: &Session, card: Option<&Permission>) -> Option<(String, Vec<(String, String)>)> {
+type PhoneMessage = (String, Vec<(String, String)>, Vec<Value>);
+
+/// The phone message for a hook event (`s` is the session after the event was applied), with its inline buttons and formatting entities.
+pub fn message(raw: &Value, s: &Session, card: Option<&Permission>) -> Option<PhoneMessage> {
     let name = raw["hook_event_name"].as_str()?;
     let mut buttons = vec![];
+    let mut entities = vec![];
     let body = if raw["tool_name"] == "AskUserQuestion" {
         // Fires PreToolUse and PermissionRequest; only one phone message.
         if name != "PreToolUse" {
@@ -38,7 +41,9 @@ pub fn message(raw: &Value, s: &Session, card: Option<&Permission>) -> Option<(S
             // Background task results arrive as prompts; they are not the user's.
             "UserPromptSubmit" => format!("You (PC): {}", raw["prompt"].as_str().filter(|p| !p.starts_with("<task-notification>"))?),
             "Stop" => {
-                let mut lines: Vec<String> = raw["last_assistant_message"].as_str().filter(|m| !m.is_empty()).map(str::to_owned).into_iter().collect();
+                let (answer, spans) = telegram::render(raw["last_assistant_message"].as_str().unwrap_or_default());
+                entities = spans;
+                let mut lines: Vec<String> = Some(answer).filter(|a| !a.is_empty()).into_iter().collect();
                 lines.extend(s.todos.iter().map(|t| format!("{}{}", if t.status == TodoStatus::Completed { "[x] " } else { "[ ] " }, t.subject)));
                 if lines.is_empty() {
                     return None;
@@ -59,7 +64,9 @@ pub fn message(raw: &Value, s: &Session, card: Option<&Permission>) -> Option<(S
             _ => return None,
         }
     };
-    Some((format!("{} {}\n{}", circle(s.color), s.project, telegram::cut(&body)), buttons))
+    let head = format!("{} {}\n", circle(s.color), s.project);
+    let entities = telegram::place(entities, &head, &body);
+    Some((format!("{head}{}", telegram::cut(&body)), buttons, entities))
 }
 
 /// A held AskUserQuestion waiting for phone answers.
@@ -238,7 +245,7 @@ impl Phone {
 
     fn say(&self, text: impl Into<String>, buttons: Vec<(String, String)>) {
         if let Some(out) = self.out() {
-            let _ = out.send(Out::Send { session_id: None, text: text.into(), buttons, tag: None });
+            let _ = out.send(Out::Send { session_id: None, text: text.into(), buttons, tag: None, entities: vec![] });
         }
     }
 
@@ -460,7 +467,7 @@ impl Phone {
             buttons.push(("Done".into(), format!("q:{id}:{}:done", a.current)));
         }
         if let Some(out) = self.out() {
-            let _ = out.send(Out::Send { session_id: Some(s.id.clone()), text: telegram::cut(&text), buttons, tag: Some(format!("q:{id}:{}", a.current)) });
+            let _ = out.send(Out::Send { session_id: Some(s.id.clone()), text: telegram::cut(&text), buttons, tag: Some(format!("q:{id}:{}", a.current)), entities: vec![] });
         }
     }
 
@@ -489,19 +496,28 @@ impl Phone {
     }
 
     pub fn on_event(&mut self, raw: &Value, s: &Session, card: Option<&Permission>) {
-        if self.chat.load(Ordering::Relaxed) == 0 || !self.away.load(Ordering::Relaxed) {
+        if self.chat.load(Ordering::Relaxed) == 0 {
             return;
         }
+        // The phone's own prompt starting its turn. Acknowledged even with Away off: the user is on the phone.
+        // shortcut: only the last delivered text per session is remembered, so of several sent before the first starts only the last is acknowledged. Upgrade: keep a queue per session.
         if raw["hook_event_name"] == "UserPromptSubmit"
             && self.delivered.get(&s.id).is_some_and(|d| Some(d.trim()) == raw["prompt"].as_str().map(str::trim))
         {
             self.delivered.remove(&s.id);
+            if let Some(out) = self.out() {
+                let text = format!("{} {}\nWorking on it", circle(s.color), s.project);
+                let _ = out.send(Out::Send { session_id: Some(s.id.clone()), text, buttons: vec![], tag: None, entities: vec![] });
+            }
             return;
         }
-        if let Some((text, buttons)) = message(raw, s, card)
+        if !self.away.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some((text, buttons, entities)) = message(raw, s, card)
             && let Some(out) = self.out()
         {
-            let _ = out.send(Out::Send { session_id: Some(s.id.clone()), text, buttons, tag: None });
+            let _ = out.send(Out::Send { session_id: Some(s.id.clone()), text, buttons, tag: None, entities });
         }
     }
 }
@@ -569,7 +585,7 @@ mod tests {
     #[test]
     fn card_has_allow_deny_buttons() {
         let c = Permission { req_id: 1, session_id: "s".into(), tool: "Bash".into(), verb: "Wants to run a command".into(), detail: "npm i".into(), full: String::new(), timed_out: false, gated: false };
-        let (t, b) = message(&fx("PermissionRequest"), &sess(Status::Working, vec![]), Some(&c)).unwrap();
+        let (t, b, _) = message(&fx("PermissionRequest"), &sess(Status::Working, vec![]), Some(&c)).unwrap();
         assert_eq!(t, "🟠 X\nPermission: Wants to run a command npm i");
         assert_eq!(b, vec![("Allow".to_owned(), "a:1".to_owned()), ("Deny".to_owned(), "d:1".to_owned())]);
         // AskUserQuestion's PermissionRequest stays silent: its PreToolUse already sent one.
@@ -582,8 +598,18 @@ mod tests {
             Todo { id: "1".into(), subject: "A".into(), status: TodoStatus::Completed },
             Todo { id: "2".into(), subject: "B".into(), status: TodoStatus::InProgress },
         ];
-        let (t, _) = message(&fx("Stop"), &sess(Status::Idle, todos), None).unwrap();
+        let (t, _, _) = message(&fx("Stop"), &sess(Status::Idle, todos), None).unwrap();
         assert_eq!(t, "🟠 X\ndone\n[x] A\n[ ] B");
+    }
+
+    #[test]
+    fn stop_formats_the_answer_but_not_todos() {
+        let todos = vec![Todo { id: "1".into(), subject: "**B**".into(), status: TodoStatus::InProgress }];
+        let mut r = fx("Stop");
+        r["last_assistant_message"] = json!("**hi**");
+        let (t, _, e) = message(&r, &sess(Status::Idle, todos), None).unwrap();
+        assert_eq!(t, "🟠 X\nhi\n[ ] **B**");
+        assert_eq!(e, vec![json!({"type": "bold", "offset": 5, "length": 2})]);
     }
 
     #[test]
@@ -598,7 +624,7 @@ mod tests {
         n["notification_type"] = json!("needs_input");
         n["message"] = json!("Claude is waiting");
         assert!(msg(&n).is_none(), "status is not Waiting(Other)");
-        let (t, _) = message(&n, &sess(Status::Waiting(WaitKind::Other), vec![]), None).unwrap();
+        let (t, _, _) = message(&n, &sess(Status::Waiting(WaitKind::Other), vec![]), None).unwrap();
         assert_eq!(t, "🟠 X\nWaiting for you: Claude is waiting");
     }
 
@@ -624,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn phone_prompt_not_echoed() {
+    fn phone_prompt_acknowledged_not_echoed() {
         let (mut p, rx) = paired();
         p.away.store(true, Ordering::Relaxed);
         p.listen("s".into(), File::create("NUL").unwrap());
@@ -633,9 +659,23 @@ mod tests {
         r["prompt"] = json!(" go\n");
         let s = sess(Status::Working, vec![]);
         p.on_event(&r, &s, None);
-        assert!(rx.try_recv().is_err());
+        assert!(matches!(rx.try_recv(), Ok(Out::Send { session_id: Some(id), text, .. }) if id == "s" && text == "🟠 X\nWorking on it"));
         p.on_event(&r, &s, None);
-        assert!(matches!(rx.try_recv(), Ok(Out::Send { session_id: Some(id), .. }) if id == "s"));
+        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "🟠 X\nYou (PC):  go\n"));
+    }
+
+    #[test]
+    fn phone_prompt_acknowledged_with_away_off() {
+        let (mut p, rx) = paired();
+        p.listen("s".into(), File::create("NUL").unwrap());
+        assert!(p.deliver("s", "go"));
+        let mut r = fx("UserPromptSubmit");
+        r["prompt"] = json!("go");
+        let s = sess(Status::Working, vec![]);
+        p.on_event(&r, &s, None);
+        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "🟠 X\nWorking on it"));
+        p.on_event(&r, &s, None);
+        assert!(rx.try_recv().is_err(), "PC prompts stay silent with Away off");
     }
 
     #[test]
