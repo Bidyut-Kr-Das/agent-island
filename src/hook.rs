@@ -68,6 +68,39 @@ pub fn same_exe(a: &Path, b: &Path) -> bool {
     matches!((std::fs::read(&ca), std::fs::read(&cb)), (Ok(x), Ok(y)) if x == y)
 }
 
+/// What a hook may do with the island that owns the pipe.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Island {
+    /// This build, or a newer install: talk to it.
+    Usable,
+    /// An older install: a newer hook replaces it.
+    Older,
+    /// Anything else: never talk to it, never touch it.
+    Foreign,
+}
+
+/// `<root>\<x.y.z>\bin\agent-islands.exe` as (lowercased root, version). Path only: cleanup may have deleted the folder.
+fn install(exe: &Path) -> Option<(String, [u32; 3])> {
+    let bin = exe.parent()?;
+    let version_dir = bin.parent()?;
+    if !exe.file_name()?.eq_ignore_ascii_case("agent-islands.exe") || !bin.file_name()?.eq_ignore_ascii_case("bin") {
+        return None;
+    }
+    let parts: Vec<u32> = version_dir.file_name()?.to_str()?.split('.').map(|n| n.parse().ok()).collect::<Option<_>>()?;
+    Some((version_dir.parent()?.to_string_lossy().to_lowercase(), parts.try_into().ok()?))
+}
+
+pub(crate) fn classify(server: &Path, me: &Path) -> Island {
+    if same_exe(server, me) {
+        return Island::Usable;
+    }
+    match (install(server), install(me)) {
+        (Some((a, v)), Some((b, mine))) if a == b && v > mine => Island::Usable,
+        (Some((a, v)), Some((b, mine))) if a == b && v < mine => Island::Older,
+        _ => Island::Foreign,
+    }
+}
+
 /// The island must not inherit Claude Code's stdio pipes, or the hook call never completes.
 fn no_inherit_std_handles() {
     for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
@@ -96,7 +129,7 @@ fn spawn_island() {
 }
 
 /// The pipe, the server pid, and whether this call started the island.
-pub(crate) fn connect_retry(name: &str, spawn: bool) -> Option<(std::fs::File, u32, bool)> {
+fn connect_retry(name: &str, spawn: bool) -> Option<(std::fs::File, u32, bool)> {
     let mut spawned = false;
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -110,6 +143,28 @@ pub(crate) fn connect_retry(name: &str, spawn: bool) -> Option<(std::fs::File, u
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(_) => return None,
+        }
+    }
+}
+
+/// A connection to an island this exe may talk to, and whether this call started that island.
+/// With `replace`, an older install's island is stopped and this exe's started instead. Two rounds,
+/// because an old `listen` helper can restart the old island in the gap; at most 4 s in all.
+pub(crate) fn connect_island(name: &str, spawn: bool, replace: bool) -> Option<(std::fs::File, bool)> {
+    let me = std::env::current_exe().ok()?;
+    let start = Instant::now();
+    let mut replaced = 0;
+    loop {
+        let (f, pid, spawned) = connect_retry(name, spawn)?;
+        let server = procs::exe_path(pid)?;
+        match classify(&server, &me) {
+            Island::Usable => return Some((f, spawned || replaced > 0)),
+            Island::Older if replace && replaced < 2 && start.elapsed() < Duration::from_millis(1500) => {
+                drop(f);
+                procs::terminate_exact(pid, &server);
+                replaced += 1;
+            }
+            _ => return None,
         }
     }
 }
@@ -162,14 +217,7 @@ fn run_with(name: &str, spawn: bool, input: &str) -> Option<String> {
 
 /// `token`: the Telegram bot token option; Some("") means the user turned the phone link off.
 fn forward_with_token(name: &str, spawn: bool, event: Value, gated: bool, token: Option<&str>) -> Option<String> {
-    let (mut f, server_pid, spawned) = connect_retry(name, spawn)?;
-    let verified = match (procs::exe_path(server_pid), std::env::current_exe()) {
-        (Some(a), Ok(b)) => same_exe(&a, &b),
-        _ => false,
-    };
-    if !verified {
-        return None;
-    }
+    let (mut f, spawned) = connect_island(name, spawn, spawn)?;
     let ask = event["hook_event_name"] == "PreToolUse" && event["tool_name"] == "AskUserQuestion";
     let wants_reply = event["hook_event_name"] == "PermissionRequest"
         && event["tool_name"] != "AskUserQuestion";
@@ -189,15 +237,15 @@ fn forward_with_token(name: &str, spawn: bool, event: Value, gated: bool, token:
     f.write_all(line.as_bytes()).ok()?;
     if gated {
         let d = read_reply(f);
-        return Some(pretool_output(to_reply(&d), verified, decision(&d) == Some("timeout")));
+        return Some(pretool_output(to_reply(&d), true, decision(&d) == Some("timeout")));
     }
     if ask {
-        return ask_output(to_reply(&read_reply(f)), verified, &event);
+        return ask_output(to_reply(&read_reply(f)), true, &event);
     }
     if !wants_reply {
         return None;
     }
-    decision_output(to_reply(&read_reply(f)), verified)
+    decision_output(to_reply(&read_reply(f)), true)
 }
 
 pub fn run() -> i32 {
@@ -320,6 +368,37 @@ mod tests {
         let exe = std::env::current_exe().unwrap();
         assert!(!same_exe(&exe, Path::new(r"C:\no\such\agent-islands.exe")));
         assert!(!same_exe(Path::new(r"C:\no\such\a.exe"), Path::new(r"C:\no\such\a.exe")));
+    }
+
+    #[test]
+    fn classify_compares_sibling_versions() {
+        let p = |v: &str| std::path::PathBuf::from(format!(r"C:\c\agent-islands\{v}\bin\agent-islands.exe"));
+        assert_eq!(classify(&p("0.1.9"), &p("0.1.10")), Island::Older);
+        assert_eq!(classify(&p("0.1.10"), &p("0.1.9")), Island::Usable);
+        assert_eq!(classify(&p("0.2.0"), &p("0.2.0")), Island::Foreign, "equal version, not provably the same file");
+        assert_eq!(classify(&p("0.2.1-beta"), &p("0.2.2")), Island::Foreign);
+        assert_eq!(classify(&p("0.2"), &p("0.2.2")), Island::Foreign);
+        let upper = std::path::PathBuf::from(r"C:\C\AGENT-ISLANDS\0.1.9\BIN\AGENT-ISLANDS.EXE");
+        assert_eq!(classify(&upper, &p("0.2.0")), Island::Older);
+    }
+
+    #[test]
+    fn classify_accepts_the_same_exe_anywhere() {
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(classify(&exe, &exe), Island::Usable);
+    }
+
+    #[test]
+    fn classify_rejects_anything_outside_the_install_folder() {
+        let me = Path::new(r"C:\c\agent-islands\0.2.1\bin\agent-islands.exe");
+        for other in [
+            r"C:\Windows\notepad.exe",
+            r"C:\c\agent-islands\0.1.0\bin\other.exe",
+            r"C:\c\agent-islands\0.1.0\agent-islands.exe",
+            r"C:\elsewhere\agent-islands\0.1.0\bin\agent-islands.exe",
+        ] {
+            assert_eq!(classify(Path::new(other), me), Island::Foreign, "{other}");
+        }
     }
 
     fn serve(name: &str, reply: Option<&'static str>) -> std::thread::JoinHandle<String> {
