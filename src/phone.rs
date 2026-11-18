@@ -35,7 +35,8 @@ pub fn message(raw: &Value, s: &Session, card: Option<&Permission>) -> Option<(S
             // Not `compact`: auto-compaction is not a new session.
             "SessionStart" if matches!(raw["source"].as_str(), Some("startup" | "clear" | "resume")) => "Started".to_owned(),
             "SessionEnd" => "Ended".to_owned(),
-            "UserPromptSubmit" => format!("You (PC): {}", raw["prompt"].as_str()?),
+            // Background task results arrive as prompts; they are not the user's.
+            "UserPromptSubmit" => format!("You (PC): {}", raw["prompt"].as_str().filter(|p| !p.starts_with("<task-notification>"))?),
             "Stop" => {
                 let mut lines: Vec<String> = raw["last_assistant_message"].as_str().filter(|m| !m.is_empty()).map(str::to_owned).into_iter().collect();
                 lines.extend(s.todos.iter().map(|t| format!("{}{}", if t.status == TodoStatus::Completed { "[x] " } else { "[ ] " }, t.subject)));
@@ -520,6 +521,8 @@ mod tests {
         let mut r = fx("UserPromptSubmit");
         r["prompt"] = json!("hi");
         assert_eq!(msg(&r).unwrap(), "🟠 X\nYou (PC): hi");
+        r["prompt"] = json!("<task-notification>\n<task-id>b</task-id>");
+        assert!(msg(&r).is_none());
         assert_eq!(msg(&fx("SessionEnd")).unwrap(), "🟠 X\nEnded");
     }
 
