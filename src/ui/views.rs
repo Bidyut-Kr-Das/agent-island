@@ -200,9 +200,8 @@ pub fn panel_rows(s: &Session, phone: &PhoneStatus) -> Vec<(RowIcon, String)> {
             Status::Waiting(_) => {}
         }
     }
-    if let PhoneStatus::Pairing { code, bot } = phone {
-        let to = bot.as_ref().map_or("your bot".to_string(), |b| format!("@{b}"));
-        rows.push((RowIcon::None, format!("Phone: send {code} to {to}")));
+    if let Some(line) = phone.pairing_line() {
+        rows.push((RowIcon::None, line));
     }
     rows
 }
@@ -677,7 +676,8 @@ pub fn settings_card(ui: &mut egui::Ui, pill: Rect, side: Side, away: bool, phon
             p.circle_filled(pos2(x + 3.5, row.center().y), 3.5, OK);
             x += 7.0 + 6.0;
         }
-        text(x, row.center().y, if lay.away_enabled { "Phone paired" } else { "Not paired" }, 12.5, FG2);
+        let line = phone.pairing_line();
+        text(x, row.center().y, if lay.away_enabled { "Phone paired" } else { line.as_deref().unwrap_or("Not paired") }, 12.5, FG2);
         if let Some(link) = lay.disconnect {
             let g = layout(&p, &[("Disconnect", fmt(12.0, "geist", LINK_RED))], f32::INFINITY, 1);
             p.galley(pos2(link.right() - g.size().x, link.center().y - g.size().y / 2.0), g, LINK_RED);
@@ -738,7 +738,7 @@ mod tests {
     #[test]
     fn pairing_line_only_while_pairing() {
         let s = sess_with(Status::Idle, vec![]);
-        let pairing = |bot: Option<&str>| PhoneStatus::Pairing { code: "482913".into(), bot: bot.map(String::from) };
+        let pairing = |bot: Option<&str>| PhoneStatus::Pairing { code: "482913".into(), bot: bot.map(String::from), problem: None };
         assert_eq!(panel_rows(&s, &pairing(Some("mybot"))).last().unwrap(), &(RowIcon::None, "Phone: send 482913 to @mybot".to_string()));
         assert_eq!(panel_rows(&s, &pairing(None)).last().unwrap(), &(RowIcon::None, "Phone: send 482913 to your bot".to_string()));
         assert_eq!(panel_rows(&s, &PhoneStatus::Off).len(), 1);
@@ -746,7 +746,7 @@ mod tests {
     }
 
     fn pairing() -> PhoneStatus {
-        PhoneStatus::Pairing { code: "482913".into(), bot: None }
+        PhoneStatus::Pairing { code: "482913".into(), bot: None, problem: None }
     }
 
     #[test]

@@ -79,8 +79,19 @@ pub enum Action {
 
 pub enum PhoneStatus {
     Off,
-    Pairing { code: String, bot: Option<String> },
+    Pairing { code: String, bot: Option<String>, problem: Option<&'static str> },
     Paired,
+}
+
+impl PhoneStatus {
+    /// What the user must do to pair, or why they can't right now.
+    pub fn pairing_line(&self) -> Option<String> {
+        let PhoneStatus::Pairing { code, bot, problem } = self else { return None };
+        Some(match problem {
+            Some(p) => format!("Phone: {p}"),
+            None => format!("Phone: send {code} to {}", bot.as_ref().map_or("your bot".to_string(), |b| format!("@{b}"))),
+        })
+    }
 }
 
 const CODE_TTL: Duration = Duration::from_secs(600);
@@ -112,6 +123,8 @@ pub struct Phone {
     code_at: Instant,
     wrong: u32,
     pub bot: Option<String>,
+    /// Why the Telegram link is failing right now.
+    problem: Option<&'static str>,
     /// Text waiting for a session pick.
     held: Option<String>,
     /// Permission ids whose hook gave up waiting.
@@ -135,7 +148,7 @@ impl Default for Phone {
     fn default() -> Phone {
         Phone {
             listeners: HashMap::new(), token: String::new(), link: None, out: None, tx: None, chat: Arc::default(), away: Arc::default(), sent: HashMap::new(),
-            delivered: HashMap::new(), code: new_code(), code_at: Instant::now(), wrong: 0, bot: None, held: None, timed_out: HashSet::new(), asks: HashMap::new(), ask_msgs: HashMap::new(), settings: None,
+            delivered: HashMap::new(), code: new_code(), code_at: Instant::now(), wrong: 0, bot: None, problem: None, held: None, timed_out: HashSet::new(), asks: HashMap::new(), ask_msgs: HashMap::new(), settings: None,
             started: unix_now(), told_stale: false,
         }
     }
@@ -179,6 +192,7 @@ impl Phone {
         }
         self.link = None;
         self.token = t;
+        self.problem = None;
         self.renew(Instant::now());
         if !self.token.is_empty()
             && let Some(tx) = self.tx.clone()
@@ -218,7 +232,7 @@ impl Phone {
         } else if self.token.is_empty() {
             PhoneStatus::Off
         } else {
-            PhoneStatus::Pairing { code: self.code.clone(), bot: self.bot.clone() }
+            PhoneStatus::Pairing { code: self.code.clone(), bot: self.bot.clone(), problem: self.problem }
         }
     }
 
@@ -266,6 +280,7 @@ impl Phone {
         }
         match m {
             Incoming::BotName(n) => self.bot = Some(n),
+            Incoming::LinkProblem(p) => self.problem = p,
             Incoming::Text { chat, text, .. } if paired == 0 => {
                 self.expire(now);
                 if text.trim() == self.code {
@@ -709,6 +724,20 @@ mod tests {
         p.set_token("t".into());
         assert_ne!(p.code, old);
         assert_eq!(p.wrong, 0);
+    }
+
+    #[test]
+    fn link_problem_replaces_code_until_cleared() {
+        let (mut p, _rx) = unpaired();
+        p.set_token("t".into());
+        let now = Instant::now();
+        p.incoming(Incoming::LinkProblem(Some("bot token rejected")), &[], now);
+        assert_eq!(p.status(now).pairing_line().unwrap(), "Phone: bot token rejected");
+        p.incoming(Incoming::LinkProblem(None), &[], now);
+        assert_eq!(p.status(now).pairing_line().unwrap(), format!("Phone: send {} to your bot", p.code));
+        p.incoming(Incoming::LinkProblem(Some("bot token rejected")), &[], now);
+        p.set_token("new".into());
+        assert_eq!(p.status(now).pairing_line().unwrap(), format!("Phone: send {} to your bot", p.code));
     }
 
     #[test]

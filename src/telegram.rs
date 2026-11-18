@@ -16,6 +16,8 @@ pub enum Incoming {
     /// `date` is that of the message carrying the button.
     Button { chat: i64, callback_id: String, data: String, date: i64 },
     BotName(String),
+    /// Why the link is failing; None once it works again.
+    LinkProblem(Option<&'static str>),
 }
 
 pub fn parse_update(u: &Value) -> Option<Incoming> {
@@ -56,11 +58,22 @@ impl Drop for Link {
     }
 }
 
-/// POSTs to a bot method. Errors carry no detail: the URL contains the token.
-fn call(agent: &ureq::Agent, token: &str, method: &str, body: &Value) -> Result<Value, ()> {
+const UNREACHABLE: &str = "can't reach Telegram";
+
+/// Short enough for the settings card. Telegram answers 401 or 404 to a bad token, 409 when a webhook or another poller has the bot.
+fn problem(e: &ureq::Error) -> &'static str {
+    match e {
+        ureq::Error::StatusCode(401 | 404) => "bot token rejected",
+        ureq::Error::StatusCode(409) => "bot used by another app",
+        _ => UNREACHABLE,
+    }
+}
+
+/// POSTs to a bot method. Errors are fixed strings: the URL contains the token.
+fn call(agent: &ureq::Agent, token: &str, method: &str, body: &Value) -> Result<Value, &'static str> {
     let url = format!("https://api.telegram.org/bot{token}/{method}");
-    let v = agent.post(&url).send_json(body).map_err(|_| ())?.body_mut().read_json::<Value>().map_err(|_| ())?;
-    if v["ok"].as_bool() == Some(true) { Ok(v["result"].clone()) } else { Err(()) }
+    let v = agent.post(&url).send_json(body).map_err(|e| problem(&e))?.body_mut().read_json::<Value>().map_err(|_| UNREACHABLE)?;
+    if v["ok"].as_bool() == Some(true) { Ok(v["result"].clone()) } else { Err(UNREACHABLE) }
 }
 
 pub fn start(token: String, chat: Arc<AtomicI64>, tx: Sender<Msg>) -> Link {
@@ -83,6 +96,7 @@ fn deliver(tx: &Sender<Msg>, m: Msg) -> bool {
 
 fn poll(agent: &ureq::Agent, token: &str, tx: &Sender<Msg>, stop: &AtomicBool) {
     let (mut offset, mut named, mut wait) = (0i64, false, 1u64);
+    let mut shown: Option<&'static str> = None;
     while !stop.load(Ordering::Relaxed) {
         let got = (|| {
             if !named {
@@ -90,10 +104,17 @@ fn poll(agent: &ureq::Agent, token: &str, tx: &Sender<Msg>, stop: &AtomicBool) {
                 named = true;
                 deliver(tx, Msg::Phone(Incoming::BotName(me["username"].as_str().unwrap_or_default().to_owned())));
             }
-            call(agent, token, "getUpdates", &json!({"offset": offset, "timeout": 50, "allowed_updates": ["message", "callback_query"]}))
+            // No long poll while failing, so a recovery clears the problem at once.
+            let timeout = if shown.is_some() { 0 } else { 50 };
+            call(agent, token, "getUpdates", &json!({"offset": offset, "timeout": timeout, "allowed_updates": ["message", "callback_query"]}))
         })();
         if stop.load(Ordering::Relaxed) {
             return;
+        }
+        let now = got.as_ref().err().copied();
+        if now != shown {
+            shown = now;
+            deliver(tx, Msg::Phone(Incoming::LinkProblem(now)));
         }
         match got {
             Ok(v) => {
@@ -107,7 +128,7 @@ fn poll(agent: &ureq::Agent, token: &str, tx: &Sender<Msg>, stop: &AtomicBool) {
                     }
                 }
             }
-            Err(()) => {
+            Err(_) => {
                 std::thread::sleep(Duration::from_secs(wait));
                 wait = (wait * 2).min(60);
             }
@@ -157,6 +178,14 @@ mod tests {
     fn parse_reply_text() {
         let u = json!({"update_id": 1, "message": {"message_id": 9, "chat": {"id": 5}, "text": "go", "date": 1700, "reply_to_message": {"message_id": 3}}});
         assert!(matches!(parse_update(&u), Some(Incoming::Text { chat: 5, ref text, reply_to: Some(3), date: 1700 }) if text == "go"));
+    }
+
+    #[test]
+    fn http_status_names_the_problem() {
+        assert_eq!(problem(&ureq::Error::StatusCode(401)), "bot token rejected");
+        assert_eq!(problem(&ureq::Error::StatusCode(404)), "bot token rejected");
+        assert_eq!(problem(&ureq::Error::StatusCode(409)), "bot used by another app");
+        assert_eq!(problem(&ureq::Error::StatusCode(502)), UNREACHABLE);
     }
 
     #[test]
