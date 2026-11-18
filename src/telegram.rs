@@ -1,12 +1,15 @@
 use crate::server::Msg;
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 use serde_json::{Value, json};
+use std::cmp::Reverse;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 pub enum Out {
-    Send { session_id: Option<String>, text: String, buttons: Vec<(String, String)>, tag: Option<String> },
+    /// `entities` are Telegram formatting spans over `text`, from `render` and `place`.
+    Send { session_id: Option<String>, text: String, buttons: Vec<(String, String)>, tag: Option<String>, entities: Vec<Value> },
     Answer { callback_id: String, text: String },
 }
 
@@ -39,11 +42,186 @@ pub fn parse_update(u: &Value) -> Option<Incoming> {
 }
 
 /// Telegram caps a message at 4096 chars; stay well under.
+const MAX_CHARS: usize = 3500;
+/// Telegram formats at most this many entities per message.
+const MAX_ENTITIES: usize = 100;
+
 pub fn cut(text: &str) -> String {
-    match text.char_indices().nth(3500) {
+    match text.char_indices().nth(MAX_CHARS) {
         Some((i, _)) => format!("{}... (full answer in the terminal)", &text[..i]),
         None => text.to_owned(),
     }
+}
+
+/// Plain text being built, with entity offsets in UTF-16 units as Telegram counts them.
+#[derive(Default)]
+struct Doc {
+    text: String,
+    units: usize,
+    /// Just wrote a list marker: the item's first block stays on its line.
+    fresh: bool,
+    /// Start offset of each open span; None for a span with no entity.
+    open: Vec<(usize, Option<Value>)>,
+    done: Vec<Value>,
+}
+
+impl Doc {
+    fn push(&mut self, s: &str) {
+        self.text.push_str(s);
+        self.units += s.encode_utf16().count();
+        self.fresh = false;
+    }
+
+    fn gap(&mut self) {
+        if !self.fresh && !self.text.is_empty() {
+            while !self.text.ends_with("\n\n") {
+                self.push("\n");
+            }
+        }
+    }
+
+    fn line(&mut self) {
+        if !self.text.is_empty() && !self.text.ends_with('\n') {
+            self.push("\n");
+        }
+    }
+
+    fn trim_newlines(&mut self) {
+        while self.text.ends_with('\n') {
+            self.text.pop();
+            self.units -= 1;
+        }
+    }
+
+    /// Telegram does not allow `code` and `pre` inside other entities.
+    fn plain(&self) -> bool {
+        self.open.iter().all(|(_, e)| e.is_none())
+    }
+
+    fn start(&mut self, entity: Option<Value>) {
+        self.open.push((self.units, entity));
+    }
+
+    fn close(&mut self) {
+        if let Some((offset, Some(mut e))) = self.open.pop()
+            && self.units > offset
+        {
+            e["offset"] = json!(offset);
+            e["length"] = json!(self.units - offset);
+            self.done.push(e);
+        }
+    }
+
+    fn code(&mut self, kind: &str, s: &str) {
+        self.start(self.plain().then(|| json!({"type": kind})));
+        self.push(s);
+        self.close();
+    }
+}
+
+/// Claude's Markdown as plain text plus Telegram entities. Entities need no escaping, so odd text cannot make Telegram reject the message.
+// shortcut: Markdown escapes apply, so a Windows path outside backticks loses the backslash before punctuation (`\.claude`). Upgrade: restore it from the source range if this shows up in real answers.
+pub fn render(md: &str) -> (String, Vec<Value>) {
+    let kind = |k: &str| Some(json!({"type": k}));
+    let mut d = Doc::default();
+    let mut lists: Vec<Option<u64>> = vec![];
+    let mut in_table = false;
+    for (ev, range) in Parser::new_ext(md, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH).into_offset_iter() {
+        if in_table {
+            in_table = ev != Event::End(TagEnd::Table);
+            continue;
+        }
+        match ev {
+            Event::Start(Tag::Paragraph | Tag::HtmlBlock) => d.gap(),
+            Event::Start(Tag::Heading { .. }) => {
+                d.gap();
+                d.start(kind("bold"));
+            }
+            Event::Start(Tag::BlockQuote(_)) => {
+                d.gap();
+                // Telegram does not nest blockquotes.
+                let nested = d.open.iter().any(|(_, e)| e.as_ref().is_some_and(|e| e["type"] == "blockquote"));
+                d.start(if nested { None } else { kind("blockquote") });
+            }
+            Event::Start(Tag::CodeBlock(k)) => {
+                d.gap();
+                let mut e = d.plain().then(|| json!({"type": "pre"}));
+                if let (Some(e), CodeBlockKind::Fenced(info)) = (&mut e, &k)
+                    && let Some(lang) = info.split_whitespace().next()
+                {
+                    e["language"] = json!(lang);
+                }
+                d.start(e);
+            }
+            Event::Start(Tag::Strong) => d.start(kind("bold")),
+            Event::Start(Tag::Emphasis) => d.start(kind("italic")),
+            Event::Start(Tag::Strikethrough) => d.start(kind("strikethrough")),
+            // Claude often links local files; those mean nothing on the phone, so only the label stays.
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                let web = dest_url.starts_with("https://") || dest_url.starts_with("http://");
+                d.start(web.then(|| json!({"type": "text_link", "url": &*dest_url})));
+            }
+            Event::Start(Tag::List(first)) => {
+                if lists.is_empty() {
+                    d.gap();
+                }
+                lists.push(first);
+            }
+            Event::Start(Tag::Item) => {
+                d.line();
+                d.push(&"  ".repeat(lists.len().saturating_sub(1)));
+                let marker = match lists.last_mut() {
+                    Some(Some(n)) => {
+                        *n += 1;
+                        format!("{}. ", *n - 1)
+                    }
+                    _ => "• ".to_owned(),
+                };
+                d.push(&marker);
+                d.fresh = true;
+            }
+            // Telegram has no tables: keep the source aligned in a code block.
+            Event::Start(Tag::Table(_)) => {
+                d.gap();
+                d.code("pre", md[range].trim_end());
+                in_table = true;
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                d.trim_newlines();
+                d.close();
+            }
+            Event::End(TagEnd::Heading(_) | TagEnd::BlockQuote(_) | TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough | TagEnd::Link) => d.close(),
+            Event::End(TagEnd::List(_)) => {
+                lists.pop();
+            }
+            Event::Text(t) | Event::Html(t) | Event::InlineHtml(t) => d.push(&t),
+            Event::Code(t) => d.code("code", &t),
+            Event::SoftBreak | Event::HardBreak => d.push("\n"),
+            _ => {}
+        }
+    }
+    (d.text, d.done)
+}
+
+/// Fits `render` entities to the sent message `head` + `cut(body)`, where the rendered text starts `body`.
+pub fn place(entities: Vec<Value>, head: &str, body: &str) -> Vec<Value> {
+    let shift = head.encode_utf16().count();
+    let kept: usize = body.chars().take(MAX_CHARS).map(char::len_utf16).sum();
+    let mut placed: Vec<Value> = entities
+        .into_iter()
+        .filter_map(|mut e| {
+            let start = e["offset"].as_u64()? as usize;
+            let end = (start + e["length"].as_u64()? as usize).min(kept);
+            (start < end).then(|| {
+                e["offset"] = json!(start + shift);
+                e["length"] = json!(end - start);
+                e
+            })
+        })
+        .collect();
+    placed.sort_by_key(|e| (e["offset"].as_u64(), Reverse(e["length"].as_u64())));
+    placed.truncate(MAX_ENTITIES);
+    placed
 }
 
 /// Dropping the Link stops both threads (the poller after its current getUpdates, at most ~60 s).
@@ -145,13 +323,18 @@ fn keyboard(buttons: &[(String, String)]) -> Vec<Vec<Value>> {
 fn send_loop(agent: &ureq::Agent, token: &str, chat: &AtomicI64, tx: &Sender<Msg>, rx: Receiver<Out>) {
     // Ends when the Link (the only Sender) is dropped.
     for o in rx {
-        let (method, body, session, tag) = match o {
-            Out::Send { session_id, text, buttons, tag } => {
+        let (method, mut body, session, tag) = match o {
+            Out::Send { session_id, text, buttons, tag, entities } => {
                 let id = chat.load(Ordering::Relaxed);
                 if id == 0 {
                     continue;
                 }
-                let mut b = json!({"chat_id": id, "text": cut(&text)});
+                // Text with entities is already cut; cutting again would move the end they were fitted to.
+                let mut b = if entities.is_empty() {
+                    json!({"chat_id": id, "text": cut(&text)})
+                } else {
+                    json!({"chat_id": id, "text": text, "entities": entities})
+                };
                 if !buttons.is_empty() {
                     b["reply_markup"] = json!({"inline_keyboard": keyboard(&buttons)});
                 }
@@ -159,7 +342,13 @@ fn send_loop(agent: &ureq::Agent, token: &str, chat: &AtomicI64, tx: &Sender<Msg
             }
             Out::Answer { callback_id, text } => ("answerCallbackQuery", json!({"callback_query_id": callback_id, "text": text}), None, None),
         };
-        for _ in 0..3 {
+        for attempt in 0..3 {
+            // A rejected format must not lose the answer: the last try goes out plain.
+            if attempt == 2
+                && let Some(b) = body.as_object_mut()
+            {
+                b.remove("entities");
+            }
             if let Ok(r) = call(agent, token, method, &body) {
                 if let (Some(session_id), Some(message_id)) = (session, r["message_id"].as_i64()) {
                     deliver(tx, Msg::Sent { message_id, session_id, tag });
@@ -204,6 +393,94 @@ mod tests {
     #[test]
     fn parse_ignores_non_text() {
         assert!(parse_update(&json!({"update_id": 3, "message": {"message_id": 1, "chat": {"id": 5}, "voice": {}}})).is_none());
+    }
+
+    /// Rendered text, and each entity's type with the text it covers (read through UTF-16 offsets, as Telegram does).
+    fn spans(md: &str) -> (String, Vec<(String, String)>) {
+        let (text, entities) = render(md);
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let mut found: Vec<(String, String)> = place(entities, "", &text).iter().map(|e| {
+            let (o, l) = (e["offset"].as_u64().unwrap() as usize, e["length"].as_u64().unwrap() as usize);
+            (e["type"].as_str().unwrap().to_owned(), String::from_utf16_lossy(&units[o..o + l]))
+        }).collect();
+        found.sort();
+        (text, found)
+    }
+
+    fn span(kind: &str, text: &str) -> (String, String) {
+        (kind.to_owned(), text.to_owned())
+    }
+
+    #[test]
+    fn render_inline_styles() {
+        let (t, e) = spans("**b** *i* ~~s~~ `c`");
+        assert_eq!(t, "b i s c");
+        assert_eq!(e, vec![span("bold", "b"), span("code", "c"), span("italic", "i"), span("strikethrough", "s")]);
+    }
+
+    #[test]
+    fn render_leaves_ordinary_symbols_alone() {
+        assert_eq!(spans("snake_case_name takes ~5 min, ~10 at most, 2 * 3 * 4"), ("snake_case_name takes ~5 min, ~10 at most, 2 * 3 * 4".to_owned(), vec![]));
+    }
+
+    #[test]
+    fn render_applies_markdown_escapes_to_bare_paths() {
+        assert_eq!(render(r"C:\Users\me\.claude").0, r"C:\Users\me.claude");
+        assert_eq!(render(r"`C:\Users\me\.claude`").0, r"C:\Users\me\.claude");
+    }
+
+    #[test]
+    fn render_counts_emoji_as_two_units() {
+        let (t, e) = render("🟠 **b**");
+        assert_eq!(t, "🟠 b");
+        assert_eq!((e[0]["offset"].as_u64(), e[0]["length"].as_u64()), (Some(3), Some(1)));
+        // The "🟠 X\n" header adds 5 units.
+        assert_eq!(place(e, "🟠 X\n", &t)[0]["offset"], 8);
+    }
+
+    #[test]
+    fn render_blocks_and_lists() {
+        let (t, e) = spans("# Title\n\ntext\n\n- a\n  - b\n\n1. c\n2. d\n\n> quote");
+        assert_eq!(t, "Title\n\ntext\n\n• a\n  • b\n\n1. c\n2. d\n\nquote");
+        assert_eq!(e, vec![span("blockquote", "quote"), span("bold", "Title")]);
+    }
+
+    #[test]
+    fn render_code_is_never_nested() {
+        assert_eq!(spans("**a `b`**"), ("a b".to_owned(), vec![span("bold", "a b")]));
+        assert_eq!(spans("> ```\n> x\n> ```"), ("x".to_owned(), vec![span("blockquote", "x")]));
+    }
+
+    #[test]
+    fn render_unclosed_fence_keeps_language() {
+        let (t, e) = render("```rust\nfn a() {}");
+        assert_eq!(t, "fn a() {}");
+        assert_eq!((e[0]["type"].as_str(), e[0]["language"].as_str(), e[0]["length"].as_u64()), (Some("pre"), Some("rust"), Some(9)));
+    }
+
+    #[test]
+    fn render_links_only_for_the_web() {
+        let (t, e) = render("[phone.rs](src/phone.rs) [site](https://example.com)");
+        assert_eq!(t, "phone.rs site");
+        assert_eq!(e.len(), 1);
+        assert_eq!((&e[0]["type"], &e[0]["url"], &e[0]["offset"]), (&json!("text_link"), &json!("https://example.com"), &json!(9)));
+    }
+
+    #[test]
+    fn render_table_stays_as_source() {
+        let table = "| a | b |\n|---|---|\n| 1 | 2 |";
+        let (t, e) = spans(&format!("{table}\n\nafter"));
+        assert_eq!(t, format!("{table}\n\nafter"));
+        assert_eq!(e, vec![span("pre", table)]);
+    }
+
+    #[test]
+    fn place_fits_entities_to_the_cut() {
+        let body = "x".repeat(MAX_CHARS + 10);
+        let e = |offset: usize, length: usize| json!({"type": "bold", "offset": offset, "length": length});
+        let placed = place(vec![e(MAX_CHARS - 1, 5), e(MAX_CHARS + 1, 2)], "", &body);
+        assert_eq!(placed, vec![e(MAX_CHARS - 1, 1)]);
+        assert_eq!(place((0..150).map(|i| e(i, 1)).collect(), "", &body).len(), MAX_ENTITIES);
     }
 
     #[test]

@@ -4,6 +4,15 @@ Each `## [x.y.z]` section is the release note for tag `vx.y.z`. The release work
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-11-18
+
+### Added
+- Telegram: the bot says `Working on it` when a session starts on your message.
+- Telegram: Claude's final answer shows Markdown as Telegram formatting. Tables show as code blocks, and links to local files show as their label.
+
+### Fixed
+- The pairing panel shows why the Telegram link is failing.
+
 ## [0.2.2] - 2026-11-18
 
 ### Fixed
