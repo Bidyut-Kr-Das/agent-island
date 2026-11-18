@@ -4,7 +4,7 @@ Each `## [x.y.z]` section is the release note for tag `vx.y.z`. The release work
 
 ## [Unreleased]
 
-## [0.2.1] - 2026-11-18
+## [0.2.2] - 2026-11-18
 
 ### Fixed
 - A plugin update now replaces the running island on the next hook. Restarting it by hand is no longer needed.
