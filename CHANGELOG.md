@@ -4,6 +4,8 @@ Each `## [x.y.z]` section is the release note for tag `vx.y.z`. The release work
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-18
+
 ### Added
 - Telegram phone link. Optional and off until a bot token is set.
 - Away switch in Settings (right-click the island). With a paired phone, Away on sends everything to Telegram and waits up to 10 minutes before the terminal takes over. Away off keeps Telegram silent and everything instant at the PC.
