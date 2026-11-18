@@ -1,4 +1,5 @@
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -21,10 +22,14 @@ fn wait(mut cond: impl FnMut() -> bool, secs: u64) -> bool {
     cond()
 }
 
-/// Runs `agent-islands hook` and asserts it exits and its stdout hits EOF within 3 s.
 fn hook(pipe: &str, fixture: &str) {
+    hook_with(Path::new(EXE), pipe, fixture);
+}
+
+/// Runs `<exe> hook` and asserts it exits and its stdout hits EOF within 3 s.
+fn hook_with(exe: &Path, pipe: &str, fixture: &str) {
     let input = std::fs::read(format!("{}/tests/fixtures/{fixture}", env!("CARGO_MANIFEST_DIR"))).unwrap();
-    let mut child = Command::new(EXE)
+    let mut child = Command::new(exe)
         .arg("hook")
         .env("AGENT_ISLANDS_PIPE", pipe)
         .stdin(Stdio::piped())
@@ -61,4 +66,68 @@ fn island_starts_on_hook_and_exits_after_session_end() {
     assert!(wait(|| pipe_exists(&pipe), 3), "island did not start");
     hook(&pipe, "SessionEnd.json");
     assert!(wait(|| !pipe_exists(&pipe), 5), "island did not exit");
+}
+
+/// (pid, lowercased path) of the islands running from under `dir`. Never sees a real island.
+fn islands_under(dir: &Path) -> Vec<(u32, String)> {
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-Command", r#"Get-Process agent-islands -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Id) $($_.Path)" }"#])
+        .output()
+        .unwrap();
+    let dir = dir.to_string_lossy().replace('/', r"\").to_lowercase();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let (pid, path) = l.trim().split_once(' ')?;
+            let path = path.to_lowercase();
+            path.starts_with(&dir).then(|| Some((pid.parse().ok()?, path)))?
+        })
+        .collect()
+}
+
+/// Stops whatever a failed test left running, then clears its folder.
+struct KillUnder(PathBuf);
+impl Drop for KillUnder {
+    fn drop(&mut self) {
+        for (pid, _) in islands_under(&self.0) {
+            let _ = Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).output();
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn takeover_goes_only_forward() {
+    let pipe = format!(r"\\.\pipe\agent-islands-takeover-{}", std::process::id());
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("takeover-{}", std::process::id()));
+    let _guard = KillUnder(dir.clone());
+    let install = |version: &str| {
+        let exe = dir.join("agent-islands").join(version).join("bin").join("agent-islands.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::copy(EXE, &exe).unwrap();
+        exe
+    };
+    let (old, new) = (install("0.0.1"), install("0.0.2"));
+    // A different build: otherwise same_exe calls the two installs identical.
+    std::fs::OpenOptions::new().append(true).open(&new).unwrap().write_all(&[0]).unwrap();
+    let running = |version: &str| {
+        let list = islands_under(&dir);
+        (list.len() == 1 && list[0].1.contains(&format!(r"\{version}\bin\"))).then(|| list[0].0)
+    };
+
+    hook_with(&old, &pipe, "SessionStart.json");
+    assert!(wait(|| running("0.0.1").is_some(), 5), "old island did not start");
+
+    hook_with(&new, &pipe, "SessionStart.json");
+    assert!(wait(|| running("0.0.2").is_some(), 5), "newer hook did not replace the island: {:?}", islands_under(&dir));
+    let pid = running("0.0.2");
+
+    hook_with(&old, &pipe, "SessionStart.json");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(running("0.0.2"), pid, "older hook disturbed the newer island");
+
+    hook_with(&new, &pipe, "SessionEnd.json");
+    // 3 s empty timer, seen on idle frames 3 s apart: up to 6 s.
+    assert!(wait(|| !pipe_exists(&pipe), 10), "island did not exit");
 }

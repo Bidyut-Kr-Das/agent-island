@@ -1,13 +1,14 @@
 use crate::state::Pids;
 use std::collections::HashMap;
-use std::path::PathBuf;
-use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, STILL_ACTIVE};
+use std::path::{Path, PathBuf};
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, STILL_ACTIVE, WAIT_OBJECT_0};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Threading::{
     GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
 };
 use windows::core::PWSTR;
 
@@ -86,18 +87,52 @@ pub fn is_alive(pid: u32) -> bool {
     .unwrap_or(false)
 }
 
+fn image_path(h: HANDLE) -> Option<PathBuf> {
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    unsafe { QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len) }.ok()?;
+    Some(PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
+}
+
 pub fn exe_path(pid: u32) -> Option<PathBuf> {
-    with_process(pid, |h| unsafe {
-        let mut buf = [0u16; 1024];
-        let mut len = buf.len() as u32;
-        QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).ok()?;
-        Some(PathBuf::from(String::from_utf16_lossy(&buf[..len as usize])))
-    })
+    with_process(pid, image_path)
+}
+
+/// Stops `pid` only if it runs `image`, checked on the handle that stops it so a reused pid cannot be hit.
+/// True once the process has exited (up to 500 ms).
+pub fn terminate_exact(pid: u32, image: &Path) -> bool {
+    let want = image.to_string_lossy().to_lowercase();
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let stopped = image_path(h).is_some_and(|p| p.to_string_lossy().to_lowercase() == want)
+            && TerminateProcess(h, 0).is_ok()
+            && WaitForSingleObject(h, 500) == WAIT_OBJECT_0;
+        let _ = CloseHandle(h);
+        stopped
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminate_exact_only_stops_the_named_image() {
+        let mut child = std::process::Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert!(!terminate_exact(pid, std::path::Path::new(r"C:\Windows\notepad.exe")));
+        assert!(is_alive(pid), "a different image must not be stopped");
+        let image = exe_path(pid).unwrap();
+        let upper = PathBuf::from(image.to_string_lossy().to_uppercase());
+        assert!(terminate_exact(pid, &upper));
+        child.wait().unwrap();
+    }
 
     fn chain(names: &[&str]) -> Vec<(u32, String)> {
         names.iter().enumerate().map(|(i, n)| (i as u32 + 10, n.to_string())).collect()

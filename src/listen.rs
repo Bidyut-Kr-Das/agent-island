@@ -1,4 +1,4 @@
-use crate::hook::{connect_retry, same_exe};
+use crate::hook::connect_island;
 use crate::{pipe, procs};
 use serde_json::json;
 use std::io::{self, BufRead, BufReader, Write};
@@ -7,14 +7,8 @@ use std::time::Duration;
 /// One connection: sends the envelope, copies each received line to `out`. Ok when the island is
 /// unreachable, unverified or hangs up (the caller reconnects); Err only when `out` fails (Claude Code is gone).
 pub(crate) fn serve_lines(name: &str, sid: &str, cwd: &str, out: &mut impl Write, spawn: bool) -> io::Result<()> {
-    let Some((mut f, server_pid, _)) = connect_retry(name, spawn) else { return Ok(()) };
-    let verified = match (procs::exe_path(server_pid), std::env::current_exe()) {
-        (Some(a), Ok(b)) => same_exe(&a, &b),
-        _ => false,
-    };
-    if !verified {
-        return Ok(());
-    }
+    // Replacing is left to the session's hooks.
+    let Some((mut f, _)) = connect_island(name, spawn, false) else { return Ok(()) };
     let chain = procs::ancestors(std::process::id());
     let mut line = json!({"listen": sid, "cwd": cwd, "chain": chain}).to_string();
     line.push('\n');
