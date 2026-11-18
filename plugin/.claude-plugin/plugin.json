@@ -1,6 +1,6 @@
 {
   "name": "agent-islands",
-  "version": "0.2.3",
+  "version": "0.2.5",
   "description": "Dynamic-island style overlay showing Claude Code session status, permissions and questions",
   "userConfig": {
     "telegram_bot_token": {
