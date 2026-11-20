@@ -1,4 +1,5 @@
 #![windows_subsystem = "windows"]
+mod command;
 mod detail;
 mod event;
 mod focus;
@@ -28,6 +29,13 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some("listen") {
         let arg = |n| std::env::args().nth(n).unwrap_or_default();
         std::process::exit(listen::run(&arg(2), &arg(3)));
+    }
+    if std::env::args().nth(1).as_deref() == Some("forget") {
+        if let Some(p) = settings::path() {
+            settings::forget(&p);
+        }
+        println!("Removed the stored phone token, the pairing and the login entry. If the island is running, disconnect the phone on its settings card or end the agent-islands process.");
+        std::process::exit(0);
     }
     ui::run();
 }
