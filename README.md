@@ -36,8 +36,8 @@ See every session at a glance, follow its todos, and answer permission prompts w
 - **Command gate.** Risky shell commands always ask on the island, even in auto mode: `rm`, `del`, `Remove-Item`, `git commit`, `git push`, `git reset`, and package installs (`npm`, `pnpm`, `yarn`, `bun`, `pip`, `uv`, `cargo`).
 - **Finished pill.** Shows sessions that stopped while you looked elsewhere. Click it to clear.
 - **Left or right.** Right-click the pill to dock the island on either side of the screen.
-- **Phone link (optional).** Get each session's events on Telegram and reply from your phone. Off until you set a bot token. See [Phone link](#phone-link).
-- **Stays out of the way.** It never steals typing focus, clicks pass through its transparent areas, and it exits about 3 seconds after the last session ends.
+- **Phone link (optional).** Get each session's events on Telegram and reply from your phone, or open a folder or start `claude` with a phone command. Off until you set a bot token. See [Phone link](#phone-link).
+- **Stays out of the way.** It never steals typing focus, clicks pass through its transparent areas, and it exits about 3 seconds after the last session ends, unless a phone is paired.
 
 ## How it works
 
@@ -93,13 +93,14 @@ Replies:
 - A message that is not a reply goes to the only open session. If more than one is open, the bot asks `Which session?`.
 - When the session starts on your message, the bot says `Working on it`, even with Away off.
 - If the session is busy, your reply runs after the current turn, and the bot says `Queued: <name> is busy`.
-- Messages sent while no session is open are not delivered. The bot says so once.
+- Messages sent while the island was not running are not delivered. The bot says so once per island start.
+- A message sent while the island runs with no open session gets `No open sessions`.
 - Permission cards still time out after 30 seconds. When you are away, turn on Away (see Away mode below).
 - For voice, use your phone keyboard's dictation.
 
 Messages pass through Telegram's servers.
 
-Disconnect: right-click the island, choose the **Phone** row, then **Disconnect**. Removing the token in `/plugin` turns the feature off.
+Disconnect: right-click the island, choose the **Phone** row, then **Disconnect**. It also removes the stored token and the login entry. Disconnect is the reliable way to stop listening: removing the token in `/plugin` may leave the variable unset rather than empty, and then the island keeps the token it has.
 
 ## Away mode
 
@@ -109,6 +110,30 @@ Away mode sends everything to Telegram while you are away from the PC. Right-cli
 - **Away on.** Every event goes to Telegram, and the pill outline turns amber. Permission cards and Claude's questions wait up to 10 minutes for you, then the normal terminal prompt takes over.
 - **Questions from the phone.** Claude's questions arrive with one button per option. Multi-choice questions also get **Done**. Reply with text to give your own answer.
 - **Turning Away off** releases everything that is waiting.
+
+### Phone commands
+
+Send these to your bot from the paired phone. Commands from any other chat are ignored.
+
+- `/open <name>` opens a new Windows Terminal tab in the folder `zoxide query <name>` finds, using your default profile.
+- `/claude <name>` does the same, then runs `claude` there (in PowerShell). Accept the folder trust prompt on the PC if the folder is new.
+- `/away on|off` turns Away on or off.
+- `/help` lists the commands.
+
+`/open` and `/claude` need Away on. `/away` and `/help` always work. They need [zoxide](https://github.com/ajeetdsouza/zoxide) and Windows Terminal installed. The bot replies with the folder it opened, or why it could not.
+
+**Listening for commands.** While a phone is paired, the island stays running with an empty pill, so it can hear commands even with no Claude session open.
+
+- Pairing stores the bot token encrypted for your Windows user (DPAPI) in `%APPDATA%\agent-islands\settings.json`. It also adds the `AgentIslands` login entry (HKCU Run), so the island starts at login.
+- Disconnect removes both.
+
+Caveats:
+
+- After a plugin update, if you reboot before opening Claude, no island starts at login. It starts again with the next Claude session.
+- Uninstalling while paired leaves the token and the login entry behind. Disconnect first. If you can't, run `agent-islands.exe forget`: it removes the stored token, the pairing and the login entry. A running island keeps listening until you disconnect the phone on its settings card or end the agent-islands process.
+- Only the installed plugin exe adds the login entry. A build run from elsewhere stores the token but leaves the entry alone.
+
+**Security.** Your text never reaches a shell. Only zoxide sees it, as plain arguments. `claude` starts with normal permissions, so Allow and Deny still come to the phone.
 
 ## Release
 

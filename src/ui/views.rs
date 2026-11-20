@@ -59,7 +59,7 @@ pub fn hit(p: Pos2, r: Rect) -> bool {
 
 /// `away`: Away mode is on, the outline turns amber so the user sees everything goes to the phone.
 pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, away: bool, t: f64) -> egui::Response {
-    let h = ui.ctx().animate_value_with_time(Id::unique("pill_h"), pill_height(core.state.sessions.len()), 0.25);
+    let h = ui.ctx().animate_value_with_time(Id::unique("pill_h"), pill_height(core.state.sessions.len().max(core.listening() as usize)), 0.25);
     let r = Rect::from_min_size(pos2(pill_x(side), MARGIN), vec2(PILL_W, h));
     let resp = ui.allocate_rect(r, Sense::click());
     if r.height() < 1.0 {
@@ -579,7 +579,12 @@ fn has_phone(phone: &PhoneStatus) -> bool {
 
 pub fn settings_h(phone: &PhoneStatus) -> f32 {
     let top = 14.0 + 16.0 + 12.0 + SET_ROW + 14.0;
-    top + if has_phone(phone) { 8.0 + AWAY_ROW + 10.0 + 1.0 + 10.0 + SET_ROW } else { 0.0 }
+    top + if has_phone(phone) { 8.0 + AWAY_ROW + 10.0 + 1.0 + 10.0 + phone_row_h(phone) } else { 0.0 }
+}
+
+/// Paired adds the "Listening for commands" sub-line, laid out like the Away row.
+fn phone_row_h(phone: &PhoneStatus) -> f32 {
+    if matches!(phone, PhoneStatus::Paired) { AWAY_ROW } else { SET_ROW }
 }
 
 /// Every control's rect, so alignment can be tested without drawing.
@@ -614,9 +619,10 @@ pub fn settings_layout(card: Rect, phone: &PhoneStatus) -> SettingsLayout {
         y += AWAY_ROW + 10.0;
         out.divider_y = Some(y);
         y += 1.0 + 10.0;
-        out.phone_row = Some(Rect::from_min_max(pos2(l, y), pos2(r, y + SET_ROW)));
+        let h = phone_row_h(phone);
+        out.phone_row = Some(Rect::from_min_max(pos2(l, y), pos2(r, y + h)));
         if out.away_enabled {
-            out.disconnect = Some(Rect::from_min_size(pos2(r - LINK_W, y), vec2(LINK_W, SET_ROW)));
+            out.disconnect = Some(Rect::from_min_size(pos2(r - LINK_W, y), vec2(LINK_W, h)));
         }
     }
     out
@@ -659,7 +665,7 @@ pub fn settings_card(ui: &mut egui::Ui, pill: Rect, side: Side, away: bool, phon
         let k = if lay.away_enabled { 1.0 } else { 0.4 };
         let dim = |c: Color32| c.linear_multiply(k);
         text(row.left(), row.top() + 8.0, "Away", 12.5, dim(FG2));
-        let sub = if lay.away_enabled { "Send everything to Telegram" } else { "Pair a phone first" };
+        let sub = if lay.away_enabled { "Phone commands on; starts at login" } else { "Pair a phone first" };
         text(row.left(), row.bottom() - 7.0, sub, 11.0, dim(FG3));
         let on = away && lay.away_enabled;
         p.rect_filled(sw, 10.0, dim(if on { WARN } else { SEG_ON }));
@@ -673,11 +679,15 @@ pub fn settings_card(ui: &mut egui::Ui, pill: Rect, side: Side, away: bool, phon
         p.hline(r.left()..=r.right(), y + 0.5, Stroke::new(1.0, Color32::from_white_alpha(18)));
         let mut x = row.left();
         if lay.away_enabled {
-            p.circle_filled(pos2(x + 3.5, row.center().y), 3.5, OK);
+            // Same two-line layout as the Away row; the dot sits on the first line.
+            p.circle_filled(pos2(x + 3.5, row.top() + 8.0), 3.5, OK);
             x += 7.0 + 6.0;
+            text(x, row.top() + 8.0, "Phone paired", 12.5, FG2);
+            text(x, row.bottom() - 7.0, "Listening for commands", 11.0, FG3);
+        } else {
+            let line = phone.pairing_line();
+            text(x, row.center().y, line.as_deref().unwrap_or("Not paired"), 12.5, FG2);
         }
-        let line = phone.pairing_line();
-        text(x, row.center().y, if lay.away_enabled { "Phone paired" } else { line.as_deref().unwrap_or("Not paired") }, 12.5, FG2);
         if let Some(link) = lay.disconnect {
             let g = layout(&p, &[("Disconnect", fmt(12.0, "geist", LINK_RED))], f32::INFINITY, 1);
             p.galley(pos2(link.right() - g.size().x, link.center().y - g.size().y / 2.0), g, LINK_RED);
@@ -773,6 +783,15 @@ mod tests {
         assert_eq!(l.away_switch.unwrap().right(), want, "switch");
         assert_eq!(l.disconnect.unwrap().right(), want, "disconnect");
         assert_eq!(l.title.x, c.left() + 16.0);
+    }
+
+    #[test]
+    fn paired_phone_row_fits_listening_line() {
+        let card = |p: &PhoneStatus| settings_layout(Rect::from_min_size(pos2(0.0, 0.0), vec2(SET_W, settings_h(p))), p);
+        let l = card(&PhoneStatus::Paired);
+        assert_eq!(l.phone_row.unwrap().height(), AWAY_ROW, "two lines like the Away row");
+        assert_eq!(l.disconnect.unwrap().center().y, l.phone_row.unwrap().center().y);
+        assert_eq!(card(&pairing()).phone_row.unwrap().height(), SET_ROW);
     }
 
     #[test]

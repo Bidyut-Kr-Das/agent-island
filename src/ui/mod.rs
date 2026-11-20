@@ -39,7 +39,12 @@ impl Core {
             Msg::Event { raw, chain, reply, token } => {
                 if let Some(t) = token {
                     let empty = t.is_empty();
+                    // Every hook event carries the token: store only on a change (also migrates phones paired before autostart).
+                    let changed = t != self.phone.token();
                     self.phone.set_token(t);
+                    if changed && (empty || self.phone.chat.load(Ordering::Relaxed) != 0) {
+                        self.phone.autostart(!empty);
+                    }
                     if (empty || self.phone.chat.load(Ordering::Relaxed) == 0) && self.phone.away.load(Ordering::Relaxed) {
                         self.set_away(false);
                     }
@@ -137,7 +142,11 @@ impl Core {
                 }
             }
             Msg::Phone(m) => {
-                if let crate::phone::Action::Answer(id, r, callback_id) = self.phone.incoming(m, &self.state.sessions, Instant::now()) {
+                let action = self.phone.incoming(m, &self.state.sessions, Instant::now());
+                if let crate::phone::Action::Away(on) = action {
+                    self.set_away(on);
+                    self.phone.say(if self.phone.away.load(Ordering::Relaxed) { "Away on" } else { "Away off" }, vec![]);
+                } else if let crate::phone::Action::Answer(id, r, callback_id) = action {
                     let text = if self.replies.contains_key(&id) {
                         self.answer(id, r);
                         ""
@@ -177,6 +186,11 @@ impl Core {
         }
     }
 
+    /// Paired with a token: the island keeps running for phone commands.
+    pub fn listening(&self) -> bool {
+        self.phone.chat.load(Ordering::Relaxed) != 0 && !self.phone.token().is_empty()
+    }
+
     pub fn disconnect(&mut self) {
         self.phone.disconnect();
         self.set_away(false);
@@ -194,8 +208,12 @@ impl Core {
         if self.last_prune.is_none_or(|t| now.duration_since(t) >= PRUNE_EVERY) {
             self.last_prune = Some(now);
             self.state.prune(procs::is_alive, now_ms);
+            // Pruned sessions never send SessionEnd: drop their phone state and release their held questions.
+            self.phone.forget_gone(&self.state.sessions);
+            let (perms, asks) = (&self.state.permissions, &self.phone.asks);
+            self.replies.retain(|id, _| perms.iter().any(|p| p.req_id == *id) || asks.contains_key(id));
         }
-        if !self.state.is_empty() {
+        if !self.state.is_empty() || self.listening() {
             self.empty_since = None;
             return false;
         }
@@ -264,6 +282,13 @@ pub fn run() {
             // Away survives a restart only while still paired.
             away.store(core.phone.chat.load(Ordering::Relaxed) != 0 && settings::path().is_some_and(|p| settings::load_away(&p)), Ordering::Relaxed);
             core.phone.settings = settings::path();
+            // Paired with a stored token: listen right away. Rewriting the login entry refreshes the exe path after plugin updates.
+            if core.phone.chat.load(Ordering::Relaxed) != 0
+                && let Some(t) = settings::path().and_then(|p| settings::load_token(&p))
+            {
+                core.phone.set_token(t);
+            }
+            core.phone.autostart(!core.phone.token().is_empty());
             theme::setup_fonts(&cc.egui_ctx);
             let _ = CTX.set(cc.egui_ctx.clone());
             // Test hook, debug builds only: AGENT_ISLANDS_OPEN=<session id> opens the panel on that session once it exists.
@@ -355,7 +380,8 @@ impl eframe::App for App {
         if pill.secondary_clicked() {
             self.settings_open = !self.settings_open;
         }
-        if pill.clicked() {
+        // An empty pill (listening, no sessions) has nothing to select.
+        if pill.clicked() && !self.core.state.sessions.is_empty() {
             self.settings_open = false;
             let sessions = &self.core.state.sessions;
             let clicked = pill.interact_pointer_pos().and_then(|p| views::blob_at(p, pill.rect, sessions.len())).map(|i| &sessions[i]);
@@ -756,6 +782,17 @@ mod tests {
     }
 
     #[test]
+    fn away_command_from_paired_chat_turns_away_on() {
+        let (otx, orx) = channel();
+        let mut c = paired_core();
+        c.phone = crate::phone::Phone::with_out(otx);
+        c.phone.chat.store(7, Ordering::Relaxed);
+        c.handle(Msg::Phone(crate::telegram::Incoming::Text { chat: 7, text: "/away on".into(), reply_to: None, date: i64::MAX }), 1);
+        assert!(c.phone.away.load(Ordering::Relaxed));
+        assert!(matches!(orx.try_recv(), Ok(crate::telegram::Out::Send { text, .. }) if text == "Away on"));
+    }
+
+    #[test]
     fn away_off_rearms_cards() {
         let mut c = paired_core();
         let (rx, _) = event(&mut c, "PermissionRequest", "s", true).unwrap();
@@ -979,6 +1016,60 @@ Q?"), "{text}");
         assert!(!c.tick(t, 0));
         assert!(!c.tick(t + Duration::from_millis(2900), 0));
         assert!(c.tick(t + Duration::from_secs(3), 0));
+    }
+
+    #[test]
+    fn tick_stays_while_paired_with_no_sessions() {
+        let mut c = paired_core();
+        c.phone.set_token_for_test("t:1");
+        let t0 = Instant::now();
+        assert!(!c.tick(t0, 0));
+        assert!(!c.tick(t0 + Duration::from_secs(10), 0));
+        c.disconnect();
+        assert!(!c.tick(t0 + Duration::from_secs(11), 0));
+        assert!(c.tick(t0 + Duration::from_secs(14), 0));
+    }
+
+    /// Stub for `Phone::save_token`: records the token in the temp settings file, no registry.
+    fn fake_save(p: &std::path::Path, t: Option<&str>) {
+        settings::set(p, "phone_token", t.map_or(Value::Null, |t| json!(t))).unwrap();
+    }
+
+    #[test]
+    fn hook_token_saves_while_paired_and_clears_when_empty() {
+        let p = std::env::temp_dir().join(format!("ai-hooktok-{}.json", std::process::id()));
+        let mut c = Core::new(channel().0);
+        c.phone = crate::phone::Phone::with_out(channel().0);
+        c.phone.settings = Some(p.clone());
+        c.phone.save_token = fake_save;
+        let tok = |c: &mut Core, t: &str| c.handle(Msg::Event { raw: raw("PreToolUse", "s"), chain: vec![], reply: None, token: Some(t.into()) }, 1);
+        let stored = || serde_json::from_str::<Value>(&std::fs::read_to_string(&p).unwrap_or_default()).ok().map(|v| v["phone_token"].clone());
+        tok(&mut c, "t:1");
+        assert_eq!(stored(), None, "unpaired: nothing stored");
+        c.phone.chat.store(7, Ordering::Relaxed);
+        tok(&mut c, "t:2");
+        let saved = stored();
+        tok(&mut c, "");
+        let cleared = stored();
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(saved, Some(json!("t:2")));
+        assert_eq!(cleared, Some(Value::Null));
+    }
+
+    #[test]
+    fn prune_forgets_phone_state() {
+        let (mut c, _orx) = away_core();
+        let (srv, _cli) = pipe_pair("pr");
+        c.handle(Msg::Listen { session_id: "s".into(), cwd: "x".into(), chain: vec![], pipe: srv }, 1);
+        let (rx, id) = ask_event(&mut c, "s");
+        c.handle(Msg::Sent { message_id: 5, session_id: "s".into(), tag: None }, 1);
+        // A pid that cannot be opened counts as dead: prune drops the session.
+        c.state.sessions[0].claude_pid = Some(u32::MAX - 3);
+        c.tick(Instant::now(), 1);
+        assert!(c.state.sessions.is_empty());
+        assert!(c.phone.asks.is_empty() && c.phone.sent.is_empty() && !c.replies.contains_key(&id));
+        assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)));
+        assert!(!c.phone.deliver("s", "a"), "listener dropped");
     }
 
     #[test]

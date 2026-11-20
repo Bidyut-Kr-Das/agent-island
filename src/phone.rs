@@ -82,6 +82,8 @@ pub enum Action {
     None,
     /// An answer (request id, reply, callback id of the tap; None for typed text): Core decides if it still applies and acks the tap.
     Answer(u64, Reply, Option<String>),
+    /// `/away on|off` from the paired chat: Core flips the switch, then confirms.
+    Away(bool),
 }
 
 pub enum PhoneStatus {
@@ -145,6 +147,10 @@ pub struct Phone {
     started: i64,
     /// The "Not delivered" notice goes out once per island run.
     told_stale: bool,
+    /// Test seam: runs a phone command (default: real zoxide + wt).
+    pub run_cmd: fn(crate::command::Cmd, Sender<Out>),
+    /// Test seam: stores or clears the token and the login entry (default: `settings::autostart`).
+    pub save_token: fn(&std::path::Path, Option<&str>),
 }
 
 fn unix_now() -> i64 {
@@ -156,7 +162,9 @@ impl Default for Phone {
         Phone {
             listeners: HashMap::new(), token: String::new(), link: None, out: None, tx: None, chat: Arc::default(), away: Arc::default(), sent: HashMap::new(),
             delivered: HashMap::new(), code: new_code(), code_at: Instant::now(), wrong: 0, bot: None, problem: None, held: None, timed_out: HashSet::new(), asks: HashMap::new(), ask_msgs: HashMap::new(), settings: None,
-            started: unix_now(), told_stale: false,
+            started: unix_now(), told_stale: false, run_cmd: crate::command::spawn,
+            // Tests never touch the real token or login entry, even with `settings` set.
+            save_token: if cfg!(test) { |_, _| {} } else { crate::settings::autostart },
         }
     }
 }
@@ -208,6 +216,23 @@ impl Phone {
         }
     }
 
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Sets the token without starting a Telegram link.
+    #[cfg(test)]
+    pub fn set_token_for_test(&mut self, t: &str) {
+        self.token = t.to_owned();
+    }
+
+    /// `on`: keep the token (encrypted) and start at login; otherwise clear both. No-op without a settings file.
+    pub fn autostart(&self, on: bool) {
+        if let Some(p) = &self.settings {
+            (self.save_token)(p, on.then_some(self.token.as_str()));
+        }
+    }
+
     fn renew(&mut self, now: Instant) {
         self.code = new_code();
         self.code_at = now;
@@ -230,6 +255,7 @@ impl Phone {
         self.chat.store(0, Ordering::Relaxed);
         self.renew(Instant::now());
         self.save_chat(Value::Null);
+        self.autostart(false);
     }
 
     pub fn status(&mut self, now: Instant) -> PhoneStatus {
@@ -243,7 +269,7 @@ impl Phone {
         }
     }
 
-    fn say(&self, text: impl Into<String>, buttons: Vec<(String, String)>) {
+    pub(crate) fn say(&self, text: impl Into<String>, buttons: Vec<(String, String)>) {
         if let Some(out) = self.out() {
             let _ = out.send(Out::Send { session_id: None, text: text.into(), buttons, tag: None, entities: vec![] });
         }
@@ -293,6 +319,7 @@ impl Phone {
                 if text.trim() == self.code {
                     self.chat.store(chat, Ordering::Relaxed);
                     self.save_chat(chat.into());
+                    self.autostart(true);
                     self.say("Paired", vec![]);
                 } else {
                     self.wrong += 1;
@@ -302,6 +329,23 @@ impl Phone {
                 }
             }
             Incoming::Text { chat, text, reply_to, .. } if chat == paired => {
+                use crate::command::{self, Cmd};
+                // `/open@OtherBot` is meant for another bot in the chat: plain text here.
+                let other_bot = command::addressee(&text).zip(self.bot.as_deref()).is_some_and(|(a, b)| !a.eq_ignore_ascii_case(b));
+                match if other_bot { None } else { command::parse(&text) } {
+                    None => {}
+                    Some(Err(usage)) => { self.say(usage, vec![]); return Action::None; }
+                    Some(Ok(Cmd::Away(on))) => return Action::Away(on),
+                    Some(Ok(Cmd::Help)) => { self.say(command::HELP, vec![]); return Action::None; }
+                    Some(Ok(c)) => {
+                        if !self.away.load(Ordering::Relaxed) {
+                            self.say("Turn Away on to use commands", vec![]);
+                        } else if let Some(o) = self.out() {
+                            (self.run_cmd)(c, o.clone());
+                        }
+                        return Action::None;
+                    }
+                }
                 if let Some(&(id, qi)) = reply_to.and_then(|r| self.ask_msgs.get(&r)) {
                     if self.asks.get(&id).is_some_and(|a| a.current == qi) {
                         return self.record(id, text, sessions).map_or(Action::None, |r| Action::Answer(id, r, None));
@@ -446,7 +490,18 @@ impl Phone {
         self.listeners.remove(session_id);
         self.delivered.remove(session_id);
         self.sent.retain(|_, s| s != session_id);
+        let ids: Vec<u64> = self.asks.iter().filter(|(_, a)| a.session_id == session_id).map(|(id, _)| *id).collect();
+        self.ask_msgs.retain(|_, (id, _)| !ids.contains(id));
         self.asks.retain(|_, a| a.session_id != session_id);
+    }
+
+    /// Forgets sessions that left without SessionEnd (pruned for a dead pid).
+    pub fn forget_gone(&mut self, sessions: &[Session]) {
+        let gone: HashSet<String> = self.listeners.keys().chain(self.delivered.keys()).chain(self.sent.values()).chain(self.asks.values().map(|a| &a.session_id))
+            .filter(|id| !sessions.iter().any(|s| &s.id == *id)).cloned().collect();
+        for id in gone {
+            self.forget(&id);
+        }
     }
 
     /// Holds a question set and sends question 0 with one button per option.
@@ -478,12 +533,22 @@ impl Phone {
             && self.asks.contains_key(&id)
         {
             self.ask_msgs.insert(message_id, (id, qi));
+            // Oldest message ids go first; keeps a days-long island bounded.
+            while self.ask_msgs.len() > 256 {
+                let Some(&k) = self.ask_msgs.keys().min() else { break };
+                self.ask_msgs.remove(&k);
+            }
         }
     }
 
     /// Forgets a held question that was released or timed out; late taps for it get "Too late".
     pub fn drop_ask(&mut self, id: u64) {
         self.timed_out.insert(id);
+        // Request ids only grow, so the minimum is the oldest.
+        while self.timed_out.len() > 256 {
+            let Some(&k) = self.timed_out.iter().min() else { break };
+            self.timed_out.remove(&k);
+        }
         self.asks.remove(&id);
     }
 
@@ -540,6 +605,27 @@ mod tests {
             id: "s".into(), parent: String::new(), project: "X".into(), cwd: String::new(), transcript: String::new(),
             color: 0, status, todos, finished: None, claude_pid: None, terminal_pid: None, changed_at: 0,
         }
+    }
+
+    fn test_ask(session_id: &str) -> Ask {
+        Ask { session_id: session_id.into(), questions: vec![json!({"header": "h", "question": "q", "options": []})], answers: Default::default(), picks: vec![], current: 0 }
+    }
+
+    #[test]
+    fn timed_out_and_ask_msgs_are_capped() {
+        let mut p = Phone::default();
+        for id in 0..300u64 { p.asks.insert(id, test_ask("s")); p.note_sent(id as i64, Some(&format!("q:{id}:0"))); p.drop_ask(id); }
+        assert_eq!(p.timed_out.len(), 256);
+        assert!(!p.timed_out.contains(&0) && p.timed_out.contains(&299));
+        assert!(p.ask_msgs.len() <= 256 && !p.ask_msgs.contains_key(&0));
+    }
+
+    #[test]
+    fn forget_drops_session_ask_msgs() {
+        let mut p = Phone::default();
+        p.asks.insert(1, test_ask("s")); p.note_sent(10, Some("q:1:0"));
+        p.forget("s");
+        assert!(p.ask_msgs.is_empty());
     }
 
     fn msg(raw: &Value) -> Option<String> {
@@ -719,6 +805,81 @@ mod tests {
         (p, rx)
     }
 
+    fn sent_texts(rx: &std::sync::mpsc::Receiver<Out>) -> Vec<String> {
+        rx.try_iter().filter_map(|o| if let Out::Send { text, .. } = o { Some(text) } else { None }).collect()
+    }
+
+    fn fake_run(c: crate::command::Cmd, out: Sender<Out>) {
+        let _ = out.send(Out::Send { session_id: None, text: format!("ran {c:?}"), buttons: vec![], tag: None, entities: vec![] });
+    }
+
+    #[test]
+    fn command_runs_while_away() {
+        let (mut p, rx) = paired(); p.away.store(true, Ordering::Relaxed); p.run_cmd = fake_run;
+        p.incoming(text(7, "/open agent", None), &two(), Instant::now());
+        assert_eq!(sent_texts(&rx), vec!["ran Open([\"agent\"])"]);
+    }
+    #[test]
+    fn command_refused_while_away_off() {
+        let (mut p, rx) = paired(); p.run_cmd = fake_run;
+        p.incoming(text(7, "/claude agent", None), &two(), Instant::now());
+        assert_eq!(sent_texts(&rx), vec!["Turn Away on to use commands"]);
+    }
+    #[test]
+    fn usage_reply_runs_nothing() {
+        let (mut p, rx) = paired(); p.away.store(true, Ordering::Relaxed); p.run_cmd = fake_run;
+        p.incoming(text(7, "/open", None), &two(), Instant::now());
+        assert_eq!(sent_texts(&rx), vec!["Usage: /open <name>"]);
+    }
+    #[test]
+    fn other_slash_text_goes_to_session() {
+        let (mut p, rx) = paired(); p.away.store(true, Ordering::Relaxed); p.run_cmd = fake_run;
+        p.incoming(text(7, "/clear", None), &two(), Instant::now());
+        assert_eq!(sent_texts(&rx), vec!["Which session?"]);
+    }
+    #[test]
+    fn command_from_other_chat_ignored() {
+        let (mut p, rx) = paired(); p.away.store(true, Ordering::Relaxed); p.run_cmd = fake_run;
+        p.incoming(text(8, "/open agent", None), &two(), Instant::now());
+        let (mut u, urx) = unpaired(); u.away.store(true, Ordering::Relaxed); u.run_cmd = fake_run;
+        u.incoming(text(7, "/open agent", None), &two(), Instant::now());
+        assert!(sent_texts(&rx).is_empty() && sent_texts(&urx).is_empty());
+    }
+    #[test]
+    fn away_command_works_while_away_off() {
+        let (mut p, rx) = paired(); p.run_cmd = fake_run;
+        assert!(matches!(p.incoming(text(7, "/away on", None), &two(), Instant::now()), Action::Away(true)));
+        assert!(sent_texts(&rx).is_empty());
+    }
+    #[test]
+    fn command_for_other_bot_is_plain_text() {
+        let (mut p, rx) = paired(); p.away.store(true, Ordering::Relaxed); p.run_cmd = fake_run;
+        p.bot = Some("MyBot".into());
+        p.incoming(text(7, "/open@OtherBot agent", None), &two(), Instant::now());
+        assert_eq!(sent_texts(&rx), vec!["Which session?"]);
+        p.incoming(text(7, "/open@mybot agent", None), &two(), Instant::now());
+        assert_eq!(sent_texts(&rx), vec!["ran Open([\"agent\"])"]);
+    }
+    #[test]
+    fn forget_gone_drops_pruned_sessions() {
+        let mut p = Phone::default();
+        p.listen("s".into(), File::create("NUL").unwrap());
+        p.listen("t".into(), File::create("NUL").unwrap());
+        assert!(p.deliver("s", "a") && p.deliver("t", "b"));
+        p.sent.insert(1, "s".into());
+        p.sent.insert(2, "t".into());
+        p.asks.insert(3, test_ask("s"));
+        p.forget_gone(&[sess(Status::Idle, vec![])]);
+        assert_eq!((p.listeners.len(), p.delivered.len(), p.sent.len(), p.asks.len()), (1, 1, 1, 1));
+        assert!(p.listeners.contains_key("s") && !p.delivered.contains_key("t") && p.sent.get(&1).is_some());
+    }
+    #[test]
+    fn help_works_while_away_off() {
+        let (mut p, rx) = paired(); p.run_cmd = fake_run;
+        p.incoming(text(7, "/help", None), &two(), Instant::now());
+        assert_eq!(sent_texts(&rx), vec![crate::command::HELP]);
+    }
+
     #[test]
     fn exact_code_pairs() {
         let (mut p, rx) = unpaired();
@@ -730,6 +891,29 @@ mod tests {
 "), None), &[], now);
         assert_eq!(p.chat.load(Ordering::Relaxed), 5);
         assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "Paired"));
+    }
+
+    fn fake_save(p: &std::path::Path, t: Option<&str>) {
+        crate::settings::set(p, "phone_token", t.map_or(Value::Null, |t| json!(t))).unwrap();
+    }
+
+    #[test]
+    fn pairing_stores_token_and_disconnect_clears_it() {
+        let (mut p, _rx) = unpaired();
+        let path = std::env::temp_dir().join(format!("ai-pairtok-{}.json", std::process::id()));
+        p.settings = Some(path.clone());
+        p.save_token = fake_save;
+        p.set_token_for_test("t:1");
+        let code = p.code.clone();
+        p.incoming(text(5, &code, None), &[], Instant::now());
+        let paired = crate::settings::load_chat(&path);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        p.disconnect();
+        let after = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(paired, Some(5));
+        assert!(saved.contains("\"phone_token\":\"t:1\""), "{saved}");
+        assert!(after.contains("\"phone_token\":null"), "{after}");
     }
 
     #[test]

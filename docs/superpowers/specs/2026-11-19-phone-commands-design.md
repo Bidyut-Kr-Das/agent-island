@@ -231,3 +231,13 @@ The user pointed out a lockout: forget to turn Away on before the last session c
 - **Away still gates `/open` and `/claude`.**
 - **Display:** on screen, not in the tray, because that is the least code. While listening with no sessions, the empty pill stays visible: amber outline when Away is on, normal outline otherwise. Its settings card works as today. The Away sub-line becomes `Phone commands on; starts at login`, and a `Listening for commands` line shows under Phone when paired.
 - **`/help`** lists `/away on|off` too.
+
+## Spike results (2026-11-20)
+
+- **PASS:** a `windows_subsystem = "windows"` exe started with `Start-Process` spawns `wt.exe -w 0 nt -d <dir> powershell.exe -NoLogo -NoExit -Command ...`. The command runs with its working directory set to `<dir>` (checked: `D:\projects\agent-islands`).
+- **PASS:** a drive root works: `-d C:\` gives cwd `C:\`. Drive roots are accepted.
+- **Not run (user away):**
+  - the trust prompt in a new folder;
+  - phone text reaching a `/claude` session.
+
+  Both go to the manual checklist in Task 7. The `/claude` reply carries the trust-prompt hint as a precaution.
