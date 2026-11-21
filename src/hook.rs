@@ -170,15 +170,25 @@ pub(crate) fn connect_island(name: &str, spawn: bool, replace: bool) -> Option<(
 }
 
 /// The island's reply line: `decision` is "allow", "deny", "answer", or "timeout" / "skip".
-fn read_reply(f: std::fs::File) -> Option<Value> {
+fn read_reply(f: std::fs::File, wait: Duration) -> Option<Value> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut line = String::new();
         let _ = BufReader::new(f).read_line(&mut line);
         let _ = tx.send(line);
     });
-    let line = rx.recv_timeout(Duration::from_secs(605)).ok()?;
+    let line = rx.recv_timeout(wait).ok()?;
     serde_json::from_str(&line).ok()
+}
+
+const STE: &str = "The user reads this reply on a phone. Write in ASD-STE100 Simplified Technical English. First line: the result. Then: what you need from the user, if anything. Then details. One idea per sentence. Max 20 words per sentence. Active voice. No filler, no pleasantries. Keep code, paths, commands and error text exact.";
+
+/// UserPromptSubmit stdout: the STE instruction, only when the island says Away is on.
+pub fn prompt_output(reply: &Option<Value>) -> Option<String> {
+    if reply.as_ref()?["away"] != true {
+        return None;
+    }
+    Some(json!({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": STE}}).to_string())
 }
 
 fn decision(v: &Option<Value>) -> Option<&str> {
@@ -235,17 +245,22 @@ fn forward_with_token(name: &str, spawn: bool, event: Value, gated: bool, token:
     let mut line = msg.to_string();
     line.push('\n');
     f.write_all(line.as_bytes()).ok()?;
+    if event["hook_event_name"] == "UserPromptSubmit" {
+        // A prompt must never be blocked: short wait, silent on any failure.
+        return prompt_output(&read_reply(f, Duration::from_millis(300)));
+    }
+    let wait = Duration::from_secs(605);
     if gated {
-        let d = read_reply(f);
+        let d = read_reply(f, wait);
         return Some(pretool_output(to_reply(&d), true, decision(&d) == Some("timeout")));
     }
     if ask {
-        return ask_output(to_reply(&read_reply(f)), true, &event);
+        return ask_output(to_reply(&read_reply(f, wait)), true, &event);
     }
     if !wants_reply {
         return None;
     }
-    decision_output(to_reply(&read_reply(f)), true)
+    decision_output(to_reply(&read_reply(f, wait)), true)
 }
 
 pub fn run() -> i32 {
@@ -337,6 +352,28 @@ mod tests {
         let out = run_with(&name, false, r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#);
         assert_eq!(out, None);
         assert!(t.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn prompt_output_only_when_away() {
+        let out = prompt_output(&Some(json!({"away": true}))).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
+        assert_eq!(v["hookSpecificOutput"]["additionalContext"], STE);
+        for r in [Some(json!({"away": false})), None, Some(json!({}))] {
+            assert_eq!(prompt_output(&r), None);
+        }
+    }
+
+    #[test]
+    fn prompt_reply_wait_is_short() {
+        let name = format!(r"\\.\pipe\ai-test-promptwait-{}", std::process::id());
+        let t = serve(&name, None);
+        let (f, _) = crate::pipe::connect_to(&name).unwrap();
+        let start = Instant::now();
+        assert_eq!(read_reply(f, Duration::from_millis(300)), None);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        drop(t);
     }
 
     #[test]
