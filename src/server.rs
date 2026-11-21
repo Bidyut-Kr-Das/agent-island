@@ -79,6 +79,10 @@ fn serve(f: std::fs::File, tx: &Sender<Msg>, wake: &impl Fn(), away: &AtomicBool
     if ask && !is_away {
         (&f).write_all(b"{\"decision\":\"skip\"}\n").ok()?;
     }
+    if raw["hook_event_name"] == "UserPromptSubmit" {
+        // The hook may already be gone; the event is still forwarded.
+        let _ = (&f).write_all(format!("{{\"away\":{is_away}}}\n").as_bytes());
+    }
     let wants = gated || held_ask || raw["hook_event_name"] == "PermissionRequest" && raw["tool_name"] != "AskUserQuestion";
     if !wants {
         tx.send(Msg::Event { raw, chain, reply: None, token }).ok()?;
@@ -149,6 +153,31 @@ mod tests {
         let (mut c, _) = crate::pipe::connect_to(&name).unwrap();
         c.write_all(format!("{envelope}\n").as_bytes()).unwrap();
         (rx.recv_timeout(Duration::from_secs(3)).unwrap(), c)
+    }
+
+    #[test]
+    fn prompt_submit_gets_away_flag() {
+        let ev = serde_json::json!({"hook_event_name": "UserPromptSubmit"});
+        for (away, want) in [(true, "{\"away\":true}\n"), (false, "{\"away\":false}\n")] {
+            let (msg, c) = send_with(&format!("prompt{away}"), serde_json::json!({"event": ev, "chain": []}), away, WAIT);
+            assert!(matches!(msg, Msg::Event { .. }));
+            assert_eq!(read_all(c), want);
+        }
+    }
+
+    #[test]
+    fn prompt_submit_forwards_even_if_hook_closed() {
+        let name = format!(r"\\.\pipe\ai-test-srv-closed-{}", std::process::id());
+        let mut server = Server::create_first_named(&name).unwrap();
+        let (tx, rx): (Sender<Msg>, Receiver<Msg>) = channel();
+        let (mut c, _) = crate::pipe::connect_to(&name).unwrap();
+        let f = server.accept().unwrap();
+        c.write_all(b"{\"event\":{\"hook_event_name\":\"UserPromptSubmit\"},\"chain\":[]}\n").unwrap();
+        drop(c);
+        std::thread::spawn(move || {
+            let _ = serve(f, &tx, &|| {}, &AtomicBool::new(true), WAIT);
+        });
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), Msg::Event { .. }));
     }
 
     #[test]

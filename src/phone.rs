@@ -8,13 +8,18 @@ use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
-use serde_json::Value;
+use serde_json::{Value, json};
 use crate::hook::Reply;
 use crate::state::{Permission, Session, Status, TodoStatus, WaitKind};
-use crate::{server::Msg, telegram::{self, Incoming, Link, Out}};
+use crate::{server::Msg, telegram::{self, Incoming, Link, Out, Tap}};
 
 pub fn circle(color: usize) -> &'static str {
     ["🟠", "🔵", "🟣", "🔴", "🟢", "⚫"][color % 6]
+}
+
+/// "<circle> [<project>]": how every phone message names its session.
+pub fn head(s: &Session) -> String {
+    format!("{} [{}]", circle(s.color), s.project)
 }
 
 type PhoneMessage = (String, Vec<(String, String)>, Vec<Value>);
@@ -24,49 +29,59 @@ pub fn message(raw: &Value, s: &Session, card: Option<&Permission>) -> Option<Ph
     let name = raw["hook_event_name"].as_str()?;
     let mut buttons = vec![];
     let mut entities = vec![];
-    let body = if raw["tool_name"] == "AskUserQuestion" {
+    let mut todos = String::new();
+    let (status, body) = if raw["tool_name"] == "AskUserQuestion" {
         // Fires PreToolUse and PermissionRequest; only one phone message.
         if name != "PreToolUse" {
             return None;
         }
-        format!("Waiting for you: {}", raw["tool_input"]["questions"][0]["question"].as_str()?)
+        (" · question", raw["tool_input"]["questions"][0]["question"].as_str()?.to_owned())
     } else if let Some(c) = card {
         buttons = vec![("Allow".to_owned(), format!("a:{}", c.req_id)), ("Deny".to_owned(), format!("d:{}", c.req_id))];
-        format!("Permission: {} {}", c.verb, c.detail)
+        (" · permission", format!("{} {}", c.verb, c.detail))
     } else {
         match name {
             // Not `compact`: auto-compaction is not a new session.
-            "SessionStart" if matches!(raw["source"].as_str(), Some("startup" | "clear" | "resume")) => "Started".to_owned(),
-            "SessionEnd" => "Ended".to_owned(),
-            // Background task results arrive as prompts; they are not the user's.
-            "UserPromptSubmit" => format!("You (PC): {}", raw["prompt"].as_str().filter(|p| !p.starts_with("<task-notification>"))?),
+            "SessionStart" if matches!(raw["source"].as_str(), Some("startup" | "clear" | "resume")) => ("", "Started".to_owned()),
+            "SessionEnd" => ("", "Ended".to_owned()),
+            // The PC prompt is not echoed: the user just typed it.
+            "UserPromptSubmit" => return None,
             "Stop" => {
                 let (answer, spans) = telegram::render(raw["last_assistant_message"].as_str().unwrap_or_default());
-                entities = spans;
-                let mut lines: Vec<String> = Some(answer).filter(|a| !a.is_empty()).into_iter().collect();
-                lines.extend(s.todos.iter().map(|t| format!("{}{}", if t.status == TodoStatus::Completed { "[x] " } else { "[ ] " }, t.subject)));
-                if lines.is_empty() {
+                entities = telegram::fold(&answer, spans);
+                todos = s.todos.iter().map(|t| format!("{}{}", if t.status == TodoStatus::Completed { "[x] " } else { "[ ] " }, t.subject)).collect::<Vec<_>>().join("\n");
+                if answer.is_empty() && todos.is_empty() {
                     return None;
                 }
-                lines.join("\n")
+                ("", answer)
             }
-            "StopFailure" => format!("Error: {}", ["error", "error_details"].iter().find_map(|k| raw[k].as_str()).unwrap_or("turn failed")),
+            "StopFailure" => (" · error", ["error", "error_details"].iter().find_map(|k| raw[k].as_str()).unwrap_or("turn failed").to_owned()),
             // Same cases State::apply turns into Waiting(Other).
             "Notification"
                 if s.status == Status::Waiting(WaitKind::Other)
                     && !matches!(raw["notification_type"].as_str(), Some("permission_prompt" | "idle_prompt" | "agent_completed")) =>
             {
-                match raw["message"].as_str().filter(|m| !m.is_empty()) {
-                    Some(m) => format!("Waiting for you: {m}"),
-                    None => "Waiting for you".to_owned(),
-                }
+                (" · question", raw["message"].as_str().filter(|m| !m.is_empty()).unwrap_or("Waiting for you").to_owned())
             }
             _ => return None,
         }
     };
-    let head = format!("{} {}\n", circle(s.color), s.project);
-    let entities = telegram::place(entities, &head, &body);
-    Some((format!("{head}{}", telegram::cut(&body)), buttons, entities))
+    let top = format!("{}{status}\n", head(s));
+    // Last resort for a huge todo list; the reply gets whatever room is left under Telegram's cap.
+    let todos = telegram::cut_to(&todos, 2000);
+    let todo_units = if todos.is_empty() { 0 } else { todos.encode_utf16().count() + 1 };
+    let max = telegram::MAX_CHARS.min(telegram::MAX_UNITS.saturating_sub(top.encode_utf16().count() + telegram::CUT_SUFFIX + todo_units));
+    let mut entities = telegram::place_to(entities, &top, &body, max);
+    let mut text = format!("{top}{}", telegram::cut_to(&body, max));
+    if !todos.is_empty() {
+        if !body.is_empty() {
+            text.push('\n');
+        }
+        entities.truncate(telegram::MAX_ENTITIES - 1);
+        entities.push(json!({"type": "pre", "offset": text.encode_utf16().count(), "length": todos.encode_utf16().count()}));
+        text.push_str(&todos);
+    }
+    Some((text, buttons, entities))
 }
 
 /// A held AskUserQuestion waiting for phone answers.
@@ -80,8 +95,8 @@ pub struct Ask {
 
 pub enum Action {
     None,
-    /// An answer (request id, reply, callback id of the tap; None for typed text): Core decides if it still applies and acks the tap.
-    Answer(u64, Reply, Option<String>),
+    /// An answer (request id, reply, the tap; None for typed text): Core decides if it still applies and settles the tap.
+    Answer(u64, Reply, Option<Tap>),
     /// `/away on|off` from the paired chat: Core flips the switch, then confirms.
     Away(bool),
 }
@@ -275,19 +290,32 @@ impl Phone {
         }
     }
 
-    pub fn ack(&self, callback_id: String, text: &str) {
+    /// Answers the tap with a toast and leaves its message as it is.
+    pub fn ack(&self, tap: Tap, toast: &str) {
         if let Some(out) = self.out() {
-            let _ = out.send(Out::Answer { callback_id, text: text.to_owned() });
+            let _ = out.send(Out::Answer { callback_id: tap.callback_id, text: toast.to_owned() });
         }
     }
 
-    fn send_to(&mut self, sid: &str, text: &str, sessions: &[Session]) {
+    /// A final tap: the toast, then the message without buttons and with the outcome on a last line.
+    pub fn settle(&self, tap: Tap, outcome: &str) {
+        if let Some(out) = self.out() {
+            let _ = out.send(Out::Answer { callback_id: tap.callback_id, text: outcome.to_owned() });
+            if !tap.text.is_empty() {
+                let _ = out.send(Out::Edit { message_id: tap.message_id, text: format!("{}\n{outcome}", tap.text), entities: tap.entities });
+            }
+        }
+    }
+
+    fn send_to(&mut self, sid: &str, text: &str, sessions: &[Session]) -> String {
         let s = sessions.iter().find(|s| s.id == sid);
         let name = s.map_or(sid, |s| s.project.as_str()).to_owned();
         if !self.deliver(sid, text) {
-            self.say(format!("{name} can't receive messages right now"), vec![]);
+            format!("[{name}] can't receive messages right now")
         } else if s.is_some_and(|s| s.status != Status::Idle) {
-            self.say(format!("Queued: {name} is busy"), vec![]);
+            format!("Queued: [{name}] is busy")
+        } else {
+            format!("Sent to [{name}]")
         }
     }
 
@@ -303,9 +331,9 @@ impl Phone {
                 }
                 return Action::None;
             }
-            Incoming::Button { chat, callback_id, date, .. } if date < self.started => {
+            Incoming::Button { chat, date, tap, .. } if date < self.started => {
                 if paired != 0 && chat == paired {
-                    self.ack(callback_id, "Too late, answered in the terminal");
+                    self.settle(tap, "Too late, answered in the terminal");
                 }
                 return Action::None;
             }
@@ -352,7 +380,8 @@ impl Phone {
                     }
                     self.say(self.gone(id), vec![]);
                 } else if let Some(sid) = reply_to.and_then(|r| self.sent.get(&r)).cloned() {
-                    self.send_to(&sid, &text, sessions);
+                    let o = self.send_to(&sid, &text, sessions);
+                    self.say(o, vec![]);
                 } else if let Some(waiting) = self.waiting(sessions) {
                     if let [(id, _)] = waiting[..] {
                         return self.record(id, text, sessions).map_or(Action::None, |r| Action::Answer(id, r, None));
@@ -360,38 +389,44 @@ impl Phone {
                     let buttons = waiting.iter().filter_map(|&(id, qi)| {
                         let a = &self.asks[&id];
                         let s = sessions.iter().find(|s| s.id == a.session_id)?;
-                        Some((format!("{} {}: {}", circle(s.color), s.project, a.questions[qi]["header"].as_str().unwrap_or_default()), format!("w:{id}:{qi}")))
+                        Some((format!("{}: {}", head(s), a.questions[qi]["header"].as_str().unwrap_or_default()), format!("w:{id}:{qi}")))
                     }).collect();
                     self.held = Some(text);
                     self.say("Which question?", buttons);
                 } else {
                     match sessions {
                         [] => self.say("No open sessions", vec![]),
-                        [s] => self.send_to(&s.id, &text, sessions),
+                        [s] => {
+                            let o = self.send_to(&s.id, &text, sessions);
+                            self.say(o, vec![]);
+                        }
                         _ => {
                             self.held = Some(text);
-                            let buttons = sessions.iter().map(|s| (format!("{} {}", circle(s.color), s.project), format!("s:{}", s.id))).collect();
+                            let buttons = sessions.iter().map(|s| (head(s), format!("s:{}", s.id))).collect();
                             self.say("Which session?", buttons);
                         }
                     }
                 }
             }
-            Incoming::Button { chat, callback_id, data, .. } if paired != 0 && chat == paired => {
-                let tap = data.split_once(':').and_then(|(k, id)| Some((match k { "a" => Reply::Allow, "d" => Reply::Deny, _ => return None }, id.parse().ok()?)));
-                if let Some((reply, id)) = tap {
-                    return Action::Answer(id, reply, Some(callback_id));
+            Incoming::Button { chat, data, tap, .. } if paired != 0 && chat == paired => {
+                let ad = data.split_once(':').and_then(|(k, id)| Some((match k { "a" => Reply::Allow, "d" => Reply::Deny, _ => return None }, id.parse().ok()?)));
+                if let Some((reply, id)) = ad {
+                    return Action::Answer(id, reply, Some(tap));
                 }
                 if let Some(rest) = data.strip_prefix("q:") {
-                    return self.tap(rest, callback_id, sessions);
+                    return self.tap(rest, tap, sessions);
                 }
                 if let Some(rest) = data.strip_prefix("w:") {
-                    return self.pick_question(rest, callback_id, sessions);
+                    return self.pick_question(rest, tap, sessions);
                 }
-                self.ack(callback_id, "");
-                if let Some(sid) = data.strip_prefix("s:")
-                    && let Some(text) = self.held.take()
-                {
-                    self.send_to(sid, &text, sessions);
+                if let Some(sid) = data.strip_prefix("s:") {
+                    let o = match self.held.take() {
+                        Some(text) => self.send_to(sid, &text, sessions),
+                        None => "Already answered".to_owned(),
+                    };
+                    self.settle(tap, &o);
+                } else {
+                    self.ack(tap, "");
                 }
             }
             _ => {}
@@ -430,30 +465,38 @@ impl Phone {
     }
 
     /// A `w:<id>:<qi>` tap: the held text answers that question.
-    fn pick_question(&mut self, rest: &str, callback_id: String, sessions: &[Session]) -> Action {
+    fn pick_question(&mut self, rest: &str, tap: Tap, sessions: &[Session]) -> Action {
         let mut it = rest.split(':');
-        if let (Some(Ok(id)), Some(Ok(qi)), Some(text)) = (it.next().map(str::parse::<u64>), it.next().map(str::parse::<usize>), self.held.take()) {
+        if let (Some(Ok(id)), Some(Ok(qi))) = (it.next().map(str::parse::<u64>), it.next().map(str::parse::<usize>)) {
+            let Some(text) = self.held.take() else {
+                self.settle(tap, "Already answered");
+                return Action::None;
+            };
             if !self.asks.get(&id).is_some_and(|a| a.current == qi) {
-                self.ack(callback_id, &self.gone(id));
+                self.settle(tap, &self.gone(id));
                 return Action::None;
             }
-            if let Some(r) = self.record(id, text, sessions) {
-                return Action::Answer(id, r, Some(callback_id));
-            }
+            return match self.record(id, text, sessions) {
+                Some(r) => Action::Answer(id, r, Some(tap)),
+                None => {
+                    self.settle(tap, "Answered");
+                    Action::None
+                }
+            };
         }
-        self.ack(callback_id, "");
+        self.ack(tap, "");
         Action::None
     }
 
     /// A `q:<id>:<qi>:<oi|done>` tap (the part after `q:`).
-    fn tap(&mut self, rest: &str, callback_id: String, sessions: &[Session]) -> Action {
+    fn tap(&mut self, rest: &str, tap: Tap, sessions: &[Session]) -> Action {
         let mut it = rest.split(':');
         let (Some(Ok(id)), Some(Ok(qi)), Some(which)) = (it.next().map(str::parse::<u64>), it.next().map(str::parse::<usize>), it.next()) else {
-            self.ack(callback_id, "");
+            self.ack(tap, "");
             return Action::None;
         };
         let Some(a) = self.asks.get_mut(&id).filter(|a| a.current == qi) else {
-            self.ack(callback_id, &self.gone(id));
+            self.settle(tap, &self.gone(id));
             return Action::None;
         };
         let q = &a.questions[qi];
@@ -473,14 +516,14 @@ impl Phone {
             (false, _, Some(oi)) => labels[oi].clone(),
             _ => {
                 let text = if multi { format!("Picked: {picked}") } else { String::new() };
-                self.ack(callback_id, &text);
+                self.ack(tap, &text);
                 return Action::None;
             }
         };
         match self.record(id, answer, sessions) {
-            Some(r) => Action::Answer(id, r, Some(callback_id)),
+            Some(r) => Action::Answer(id, r, Some(tap)),
             None => {
-                self.ack(callback_id, "");
+                self.settle(tap, "Answered");
                 Action::None
             }
         }
@@ -513,9 +556,7 @@ impl Phone {
     fn send_question(&self, id: u64, s: &Session) {
         let Some(a) = self.asks.get(&id) else { return };
         let q = &a.questions[a.current];
-        let text = format!("{} {}
-{}
-{}", circle(s.color), s.project, q["header"].as_str().unwrap_or_default(), q["question"].as_str().unwrap_or_default());
+        let text = format!("{} · question\n{}\n{}", head(s), q["header"].as_str().unwrap_or_default(), q["question"].as_str().unwrap_or_default());
         let mut buttons: Vec<(String, String)> = q["options"].as_array().into_iter().flatten().enumerate()
             .map(|(oi, o)| (o["label"].as_str().unwrap_or_default().to_owned(), format!("q:{id}:{}:{oi}", a.current))).collect();
         if q["multiSelect"] == true {
@@ -571,7 +612,7 @@ impl Phone {
         {
             self.delivered.remove(&s.id);
             if let Some(out) = self.out() {
-                let text = format!("{} {}\nWorking on it", circle(s.color), s.project);
+                let text = format!("{}\nWorking on it", head(s));
                 let _ = out.send(Out::Send { session_id: Some(s.id.clone()), text, buttons: vec![], tag: None, entities: vec![] });
             }
             return;
@@ -633,14 +674,14 @@ mod tests {
     }
 
     #[test]
-    fn started_ended_and_pc_prompt() {
-        assert_eq!(msg(&fx("SessionStart")).unwrap(), "🟠 X\nStarted");
+    fn started_ended_no_pc_prompt() {
+        assert_eq!(msg(&fx("SessionStart")).unwrap(), "🟠 [X]\nStarted");
         let mut r = fx("UserPromptSubmit");
         r["prompt"] = json!("hi");
-        assert_eq!(msg(&r).unwrap(), "🟠 X\nYou (PC): hi");
+        assert!(msg(&r).is_none());
         r["prompt"] = json!("<task-notification>\n<task-id>b</task-id>");
         assert!(msg(&r).is_none());
-        assert_eq!(msg(&fx("SessionEnd")).unwrap(), "🟠 X\nEnded");
+        assert_eq!(msg(&fx("SessionEnd")).unwrap(), "🟠 [X]\nEnded");
     }
 
     #[test]
@@ -663,16 +704,16 @@ mod tests {
         n["notification_type"] = json!("needs_input");
         let s = sess(Status::Waiting(WaitKind::Other), vec![]);
         n["message"] = json!(null);
-        assert_eq!(message(&n, &s, None).unwrap().0, "🟠 X\nWaiting for you");
+        assert_eq!(message(&n, &s, None).unwrap().0, "🟠 [X] · question\nWaiting for you");
         n["message"] = json!("");
-        assert_eq!(message(&n, &s, None).unwrap().0, "🟠 X\nWaiting for you");
+        assert_eq!(message(&n, &s, None).unwrap().0, "🟠 [X] · question\nWaiting for you");
     }
 
     #[test]
     fn card_has_allow_deny_buttons() {
         let c = Permission { req_id: 1, session_id: "s".into(), tool: "Bash".into(), verb: "Wants to run a command".into(), detail: "npm i".into(), full: String::new(), timed_out: false, gated: false };
         let (t, b, _) = message(&fx("PermissionRequest"), &sess(Status::Working, vec![]), Some(&c)).unwrap();
-        assert_eq!(t, "🟠 X\nPermission: Wants to run a command npm i");
+        assert_eq!(t, "🟠 [X] · permission\nWants to run a command npm i");
         assert_eq!(b, vec![("Allow".to_owned(), "a:1".to_owned()), ("Deny".to_owned(), "d:1".to_owned())]);
         // AskUserQuestion's PermissionRequest stays silent: its PreToolUse already sent one.
         assert!(message(&fx("PermissionRequest-AskUserQuestion"), &sess(Status::Working, vec![]), Some(&c)).is_none());
@@ -685,7 +726,7 @@ mod tests {
             Todo { id: "2".into(), subject: "B".into(), status: TodoStatus::InProgress },
         ];
         let (t, _, _) = message(&fx("Stop"), &sess(Status::Idle, todos), None).unwrap();
-        assert_eq!(t, "🟠 X\ndone\n[x] A\n[ ] B");
+        assert_eq!(t, "🟠 [X]\ndone\n[x] A\n[ ] B");
     }
 
     #[test]
@@ -694,24 +735,61 @@ mod tests {
         let mut r = fx("Stop");
         r["last_assistant_message"] = json!("**hi**");
         let (t, _, e) = message(&r, &sess(Status::Idle, todos), None).unwrap();
-        assert_eq!(t, "🟠 X\nhi\n[ ] **B**");
-        assert_eq!(e, vec![json!({"type": "bold", "offset": 5, "length": 2})]);
+        assert_eq!(t, "🟠 [X]\nhi\n[ ] **B**");
+        assert_eq!(e, vec![json!({"type": "bold", "offset": 7, "length": 2}), json!({"type": "pre", "offset": 10, "length": 9})]);
+    }
+
+    #[test]
+    fn stop_cut_keeps_todos() {
+        let todos = vec![Todo { id: "1".into(), subject: "T".into(), status: TodoStatus::InProgress }];
+        let mut r = fx("Stop");
+        r["last_assistant_message"] = json!("x".repeat(5000));
+        let (t, _, _) = message(&r, &sess(Status::Idle, todos), None).unwrap();
+        assert!(t.ends_with("... (full answer in the terminal)\n[ ] T"));
+    }
+
+    #[test]
+    fn stop_with_long_reply_and_todos_fits_telegram() {
+        let todos: Vec<Todo> = (0..20).map(|i| Todo { id: i.to_string(), subject: format!("{i} {}", "t".repeat(48)), status: TodoStatus::InProgress }).collect();
+        let mut r = fx("Stop");
+        r["last_assistant_message"] = json!("x".repeat(5000));
+        let (t, _, e) = message(&r, &sess(Status::Idle, todos.clone()), None).unwrap();
+        assert!(t.encode_utf16().count() <= 4096, "{}", t.encode_utf16().count());
+        assert!(t.ends_with(&todos[19].subject));
+        let pre = e.last().unwrap();
+        let block = t.rsplit_once("terminal)\n").unwrap().1;
+        assert_eq!((pre["type"].as_str(), pre["length"].as_u64()), (Some("pre"), Some(block.encode_utf16().count() as u64)));
+        assert_eq!(pre["offset"].as_u64(), Some((t.encode_utf16().count() - block.encode_utf16().count()) as u64));
+        // A huge todo list is itself cut.
+        let huge: Vec<Todo> = (0..200).map(|i| Todo { id: i.to_string(), subject: "t".repeat(50), status: TodoStatus::InProgress }).collect();
+        let (t, _, _) = message(&r, &sess(Status::Idle, huge), None).unwrap();
+        assert!(t.encode_utf16().count() <= 4096);
+    }
+
+    #[test]
+    fn stop_todos_pre_always_fits_entity_cap() {
+        let todos = vec![Todo { id: "1".into(), subject: "T".into(), status: TodoStatus::InProgress }];
+        let mut r = fx("Stop");
+        r["last_assistant_message"] = json!((0..150).map(|_| "**a** ").collect::<String>());
+        let (_, _, e) = message(&r, &sess(Status::Idle, todos), None).unwrap();
+        assert_eq!(e.len(), telegram::MAX_ENTITIES);
+        assert_eq!(e.last().unwrap()["type"], "pre");
     }
 
     #[test]
     fn stop_failure_and_waiting() {
         let mut r = fx("Stop");
         r["hook_event_name"] = json!("StopFailure");
-        assert_eq!(msg(&r).unwrap(), "🟠 X\nError: turn failed");
+        assert_eq!(msg(&r).unwrap(), "🟠 [X] · error\nturn failed");
         r["error"] = json!("rate_limit");
-        assert_eq!(msg(&r).unwrap(), "🟠 X\nError: rate_limit");
-        assert_eq!(msg(&fx("PreToolUse-AskUserQuestion")).unwrap(), "🟠 X\nWaiting for you: Pick option for probe test: X or Y?");
+        assert_eq!(msg(&r).unwrap(), "🟠 [X] · error\nrate_limit");
+        assert_eq!(msg(&fx("PreToolUse-AskUserQuestion")).unwrap(), "🟠 [X] · question\nPick option for probe test: X or Y?");
         let mut n = fx("Notification-permission_prompt");
         n["notification_type"] = json!("needs_input");
         n["message"] = json!("Claude is waiting");
         assert!(msg(&n).is_none(), "status is not Waiting(Other)");
         let (t, _, _) = message(&n, &sess(Status::Waiting(WaitKind::Other), vec![]), None).unwrap();
-        assert_eq!(t, "🟠 X\nWaiting for you: Claude is waiting");
+        assert_eq!(t, "🟠 [X] · question\nClaude is waiting");
     }
 
     #[test]
@@ -745,9 +823,9 @@ mod tests {
         r["prompt"] = json!(" go\n");
         let s = sess(Status::Working, vec![]);
         p.on_event(&r, &s, None);
-        assert!(matches!(rx.try_recv(), Ok(Out::Send { session_id: Some(id), text, .. }) if id == "s" && text == "🟠 X\nWorking on it"));
+        assert!(matches!(rx.try_recv(), Ok(Out::Send { session_id: Some(id), text, .. }) if id == "s" && text == "🟠 [X]\nWorking on it"));
         p.on_event(&r, &s, None);
-        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "🟠 X\nYou (PC):  go\n"));
+        assert!(rx.try_recv().is_err(), "PC prompts are not echoed");
     }
 
     #[test]
@@ -759,7 +837,7 @@ mod tests {
         r["prompt"] = json!("go");
         let s = sess(Status::Working, vec![]);
         p.on_event(&r, &s, None);
-        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "🟠 X\nWorking on it"));
+        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "🟠 [X]\nWorking on it"));
         p.on_event(&r, &s, None);
         assert!(rx.try_recv().is_err(), "PC prompts stay silent with Away off");
     }
@@ -784,7 +862,7 @@ mod tests {
         let (mut p, rx) = paired();
         p.away.store(true, Ordering::Relaxed);
         p.on_event(&fx("SessionStart"), &sess(Status::Idle, vec![]), None);
-        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "🟠 X\nStarted"));
+        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "🟠 [X]\nStarted"));
     }
 
     fn two() -> Vec<Session> {
@@ -1001,7 +1079,7 @@ mod tests {
         p.listen("s".into(), File::create("NUL").unwrap());
         p.incoming(text(7, "go", None), &[sess(Status::Idle, vec![])], Instant::now());
         assert_eq!(p.delivered.get("s").map(String::as_str), Some("go"));
-        assert!(rx.try_recv().is_err());
+        assert_eq!(sent_texts(&rx), vec!["Sent to [X]"]);
         p.incoming(text(7, "go", None), &[], Instant::now());
         assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "No open sessions"));
     }
@@ -1014,10 +1092,11 @@ mod tests {
         p.incoming(text(7, "go", None), &two(), now);
         let Ok(Out::Send { text: t, buttons, .. }) = rx.try_recv() else { panic!("no question") };
         assert_eq!(t, "Which session?");
-        assert_eq!(buttons, vec![("🟠 X".to_owned(), "s:s".to_owned()), ("🔵 Y".to_owned(), "s:t".to_owned())]);
-        let b = Incoming::Button { chat: 7, callback_id: "c".into(), data: "s:t".into(), date: i64::MAX };
+        assert_eq!(buttons, vec![("🟠 [X]".to_owned(), "s:s".to_owned()), ("🔵 [Y]".to_owned(), "s:t".to_owned())]);
+        let b = Incoming::Button { chat: 7, data: "s:t".into(), date: i64::MAX, tap: mk_tap("Which session?") };
         assert!(matches!(p.incoming(b, &two(), now), Action::None));
-        assert!(matches!(rx.try_recv(), Ok(Out::Answer { callback_id, text }) if callback_id == "c" && text.is_empty()));
+        assert!(matches!(rx.try_recv(), Ok(Out::Answer { callback_id, text }) if callback_id == "c" && text == "Sent to [Y]"));
+        assert!(matches!(rx.try_recv(), Ok(Out::Edit { message_id: 9, text, .. }) if text == "Which session?\nSent to [Y]"));
         assert_eq!(p.delivered.get("t").map(String::as_str), Some("go"));
     }
 
@@ -1041,9 +1120,14 @@ mod tests {
     #[test]
     fn stale_button_is_answered_too_late() {
         let (mut p, rx) = paired();
-        let b = |chat, data: &str, date| Incoming::Button { chat, callback_id: "c".into(), data: data.into(), date };
+        let b = |chat, data: &str, date| Incoming::Button { chat, data: data.into(), date, tap: mk_tap("card") };
         assert!(matches!(p.incoming(b(7, "a:1", 1), &[], Instant::now()), Action::None));
         assert!(matches!(rx.try_recv(), Ok(Out::Answer { text, .. }) if text == "Too late, answered in the terminal"));
+        assert!(matches!(rx.try_recv(), Ok(Out::Edit { text, .. }) if text == "card\nToo late, answered in the terminal"));
+        let bare = Incoming::Button { chat: 7, data: "a:1".into(), date: 1, tap: mk_tap("") };
+        p.incoming(bare, &[], Instant::now());
+        assert!(matches!(rx.try_recv(), Ok(Out::Answer { .. })));
+        assert!(rx.try_recv().is_err(), "no edit without message text");
         assert!(matches!(p.incoming(b(6, "a:1", 1), &[], Instant::now()), Action::None));
         assert!(rx.try_recv().is_err(), "strangers are ignored");
         assert!(matches!(p.incoming(b(7, "a:1", i64::MAX), &[], Instant::now()), Action::Answer(1, _, _)));
@@ -1053,7 +1137,7 @@ mod tests {
     fn no_listener_says_cant_receive() {
         let (mut p, rx) = paired();
         p.incoming(text(7, "go", None), &[sess(Status::Idle, vec![])], Instant::now());
-        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "X can't receive messages right now"));
+        assert_eq!(sent_texts(&rx), vec!["[X] can't receive messages right now"]);
     }
 
     #[test]
@@ -1061,15 +1145,36 @@ mod tests {
         let (mut p, rx) = paired();
         p.listen("s".into(), File::create("NUL").unwrap());
         p.incoming(text(7, "go", None), &[sess(Status::Working, vec![])], Instant::now());
-        assert!(matches!(rx.try_recv(), Ok(Out::Send { text, .. }) if text == "Queued: X is busy"));
+        assert_eq!(sent_texts(&rx), vec!["Queued: [X] is busy"]);
+    }
+
+    #[test]
+    fn picker_tap_with_nothing_held_settles() {
+        let (mut p, rx) = paired();
+        let b = Incoming::Button { chat: 7, data: "s:s".into(), date: i64::MAX, tap: mk_tap("Which session?") };
+        p.incoming(b, &two(), Instant::now());
+        assert!(matches!(rx.try_recv(), Ok(Out::Answer { text, .. }) if text == "Already answered"));
+        assert!(matches!(rx.try_recv(), Ok(Out::Edit { text, .. }) if text.ends_with("\nAlready answered")));
+    }
+
+    #[test]
+    fn typed_text_to_idle_session_says_sent() {
+        let (mut p, rx) = paired();
+        p.listen("s".into(), File::create("NUL").unwrap());
+        p.incoming(text(7, "go", None), &[sess(Status::Idle, vec![])], Instant::now());
+        assert_eq!(sent_texts(&rx), vec!["Sent to [X]"]);
     }
 
     fn q(question: &str, header: &str, labels: &[&str], multi: bool) -> Value {
         json!({"question": question, "header": header, "multiSelect": multi, "options": labels.iter().map(|l| json!({"label": l})).collect::<Vec<_>>()})
     }
 
+    fn mk_tap(text: &str) -> crate::telegram::Tap {
+        crate::telegram::Tap { callback_id: "c".into(), message_id: 9, text: text.into(), entities: vec![] }
+    }
+
     fn tap(p: &mut Phone, data: &str) -> Action {
-        p.incoming(Incoming::Button { chat: 7, callback_id: "c".into(), data: data.into(), date: i64::MAX }, &two(), Instant::now())
+        p.incoming(Incoming::Button { chat: 7, data: data.into(), date: i64::MAX, tap: mk_tap("card") }, &two(), Instant::now())
     }
 
     /// Holds a question set for session `s` and registers each sent message as id 100 + question index.
@@ -1095,9 +1200,7 @@ mod tests {
         p.away.store(true, Ordering::Relaxed);
         p.ask(4, &sess(Status::Idle, vec![]), vec![q("Which?", "Pick", &["A", "B"], true)]);
         let Ok(Out::Send { text, buttons, tag, .. }) = rx.try_recv() else { panic!("no question") };
-        assert_eq!(text, "🟠 X
-Pick
-Which?");
+        assert_eq!(text, "🟠 [X] · question\nPick\nWhich?");
         assert_eq!(buttons, vec![("A".to_owned(), "q:4:0:0".to_owned()), ("B".to_owned(), "q:4:0:1".to_owned()), ("Done".to_owned(), "q:4:0:done".to_owned())]);
         assert_eq!(tag.as_deref(), Some("q:4:0"));
     }
@@ -1107,7 +1210,7 @@ Which?");
         let (mut p, rx) = paired();
         held(&mut p, &rx, 4, vec![q("Which?", "Pick", &["A", "B"], false)]);
         let Action::Answer(4, Reply::Answer(a), Some(cb)) = tap(&mut p, "q:4:0:1") else { panic!("no answer") };
-        assert_eq!((a, cb), (json!({"Which?": "B"}), "c".to_owned()));
+        assert_eq!((a, cb.callback_id), (json!({"Which?": "B"}), "c".to_owned()));
         assert!(p.asks.is_empty());
         assert!(matches!(tap(&mut p, "q:4:0:1"), Action::None));
         assert_eq!(ack_text(&rx), "Already answered");
@@ -1119,6 +1222,7 @@ Which?");
         held(&mut p, &rx, 4, vec![q("Which?", "Pick", &["A", "B", "C"], true)]);
         assert!(matches!(tap(&mut p, "q:4:0:0"), Action::None));
         assert_eq!(ack_text(&rx), "Picked: A");
+        assert!(rx.try_recv().is_err(), "toggle leaves the message alone");
         tap(&mut p, "q:4:0:2");
         assert_eq!(ack_text(&rx), "Picked: A, C");
         tap(&mut p, "q:4:0:1");
@@ -1170,7 +1274,7 @@ Which?");
         assert!(matches!(p.incoming(text(7, "free", None), &two(), Instant::now()), Action::None));
         let Ok(Out::Send { text: t, buttons, .. }) = rx.try_recv() else { panic!("no prompt") };
         assert_eq!(t, "Which question?");
-        assert_eq!(buttons, vec![("🟠 X: H1".to_owned(), "w:4:0".to_owned()), ("🔵 Y: H2".to_owned(), "w:5:0".to_owned())]);
+        assert_eq!(buttons, vec![("🟠 [X]: H1".to_owned(), "w:4:0".to_owned()), ("🔵 [Y]: H2".to_owned(), "w:5:0".to_owned())]);
         let a = tap(&mut p, "w:5:0");
         assert!(matches!(a, Action::Answer(5, Reply::Answer(ref v), Some(_)) if *v == json!({"Q2?": "free"})));
         assert!(p.asks.contains_key(&4));
@@ -1185,10 +1289,8 @@ Which?");
         assert_eq!(ack_text(&rx), "Picked: B");
         assert!(matches!(tap(&mut p, "q:4:0:done"), Action::None));
         let Ok(Out::Send { text, tag, .. }) = rx.try_recv() else { panic!("no second question") };
-        assert_eq!((text.as_str(), tag.as_deref()), ("🟠 X
-H2
-Q2?", Some("q:4:1")));
-        assert_eq!(ack_text(&rx), "");
+        assert_eq!((text.as_str(), tag.as_deref()), ("🟠 [X] · question\nH2\nQ2?", Some("q:4:1")));
+        assert_eq!(ack_text(&rx), "Answered");
         let Action::Answer(4, Reply::Answer(a), Some(_)) = tap(&mut p, "q:4:1:0") else { panic!("no answer") };
         assert_eq!(a, json!({"Q1?": "B", "Q2?": "C"}));
     }

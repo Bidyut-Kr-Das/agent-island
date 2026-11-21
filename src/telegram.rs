@@ -11,13 +11,24 @@ pub enum Out {
     /// `entities` are Telegram formatting spans over `text`, from `render` and `place`.
     Send { session_id: Option<String>, text: String, buttons: Vec<(String, String)>, tag: Option<String>, entities: Vec<Value> },
     Answer { callback_id: String, text: String },
+    /// Rewrites a sent message without its buttons; `entities` are those the message already had.
+    Edit { message_id: i64, text: String, entities: Vec<Value> },
+}
+
+/// The button tap and the message it was on.
+pub struct Tap {
+    pub callback_id: String,
+    pub message_id: i64,
+    /// Empty when Telegram sent none.
+    pub text: String,
+    pub entities: Vec<Value>,
 }
 
 pub enum Incoming {
     /// `date` is the message's unix time in seconds.
     Text { chat: i64, text: String, reply_to: Option<i64>, date: i64 },
     /// `date` is that of the message carrying the button.
-    Button { chat: i64, callback_id: String, data: String, date: i64 },
+    Button { chat: i64, data: String, date: i64, tap: Tap },
     BotName(String),
     /// Why the link is failing; None once it works again.
     LinkProblem(Option<&'static str>),
@@ -35,22 +46,40 @@ pub fn parse_update(u: &Value) -> Option<Incoming> {
     let q = u.get("callback_query")?;
     Some(Incoming::Button {
         chat: q["message"]["chat"]["id"].as_i64()?,
-        callback_id: q["id"].as_str()?.to_owned(),
         data: q["data"].as_str()?.to_owned(),
         date: q["message"]["date"].as_i64().unwrap_or(0),
+        tap: Tap {
+            callback_id: q["id"].as_str()?.to_owned(),
+            message_id: q["message"]["message_id"].as_i64().unwrap_or(0),
+            text: q["message"]["text"].as_str().unwrap_or_default().to_owned(),
+            entities: q["message"]["entities"].as_array().cloned().unwrap_or_default(),
+        },
     })
 }
 
 /// Telegram caps a message at 4096 chars; stay well under.
-const MAX_CHARS: usize = 3500;
+pub const MAX_CHARS: usize = 3500;
 /// Telegram formats at most this many entities per message.
-const MAX_ENTITIES: usize = 100;
+pub const MAX_ENTITIES: usize = 100;
+/// Telegram's hard cap on a message, in UTF-16 units.
+pub const MAX_UNITS: usize = 4096;
+/// Length of the suffix `cut_to` appends.
+pub const CUT_SUFFIX: usize = 33;
 
 pub fn cut(text: &str) -> String {
-    match text.char_indices().nth(MAX_CHARS) {
-        Some((i, _)) => format!("{}... (full answer in the terminal)", &text[..i]),
-        None => text.to_owned(),
+    cut_to(text, MAX_CHARS)
+}
+
+/// Keeps at most `max` UTF-16 units of `text`, then the "full answer" suffix.
+pub fn cut_to(text: &str, max: usize) -> String {
+    let mut units = 0;
+    for (i, c) in text.char_indices() {
+        units += c.len_utf16();
+        if units > max {
+            return format!("{}... (full answer in the terminal)", &text[..i]);
+        }
     }
+    text.to_owned()
 }
 
 /// Plain text being built, with entity offsets in UTF-16 units as Telegram counts them.
@@ -204,9 +233,21 @@ pub fn render(md: &str) -> (String, Vec<Value>) {
 }
 
 /// Fits `render` entities to the sent message `head` + `cut(body)`, where the rendered text starts `body`.
+#[cfg(test)]
 pub fn place(entities: Vec<Value>, head: &str, body: &str) -> Vec<Value> {
+    place_to(entities, head, body, MAX_CHARS)
+}
+
+/// `place` for a body cut with `cut_to(body, max)`.
+pub fn place_to(entities: Vec<Value>, head: &str, body: &str, max: usize) -> Vec<Value> {
     let shift = head.encode_utf16().count();
-    let kept: usize = body.chars().take(MAX_CHARS).map(char::len_utf16).sum();
+    let mut kept = 0;
+    for c in body.chars() {
+        if kept + c.len_utf16() > max {
+            break;
+        }
+        kept += c.len_utf16();
+    }
     let mut placed: Vec<Value> = entities
         .into_iter()
         .filter_map(|mut e| {
@@ -222,6 +263,50 @@ pub fn place(entities: Vec<Value>, head: &str, body: &str) -> Vec<Value> {
     placed.sort_by_key(|e| (e["offset"].as_u64(), Reverse(e["length"].as_u64())));
     placed.truncate(MAX_ENTITIES);
     placed
+}
+
+/// Collapses everything after the first paragraph (or third line) of `text` into an expandable quote, never splitting a code block.
+pub fn fold(text: &str, mut entities: Vec<Value>) -> Vec<Value> {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let mut newlines = 0;
+    let Some(mut split) = units.iter().enumerate().find_map(|(i, &u)| {
+        newlines += (u == 10) as usize;
+        (u == 10 && (newlines == 3 || i > 0 && units[i - 1] == 10)).then_some(i + 1)
+    }) else { return entities };
+    if String::from_utf16_lossy(&units[split..]).trim().is_empty() {
+        return entities;
+    }
+    let span = |e: &Value| {
+        let o = e["offset"].as_u64().unwrap_or(0) as usize;
+        (o, o + e["length"].as_u64().unwrap_or(0) as usize)
+    };
+    if let Some(start) = entities.iter().filter(|e| matches!(e["type"].as_str(), Some("pre" | "code"))).map(span).find(|&(o, end)| o < split && split < end).map(|(o, _)| o) {
+        if start == 0 {
+            return entities;
+        }
+        split = start;
+    }
+    let mut folded = vec![];
+    for e in entities.drain(..) {
+        let (o, end) = span(&e);
+        // Telegram forbids a quote inside the expandable quote.
+        let quote = e["type"] == "blockquote";
+        if quote && o >= split {
+            continue;
+        }
+        if o < split && split < end {
+            for (a, b) in [(o, split), (split, end)] {
+                if quote && a == split {
+                    continue;
+                }
+                folded.push(Value::Object(e.as_object().cloned().unwrap_or_default().into_iter().chain([("offset".into(), json!(a)), ("length".into(), json!(b - a))]).collect()));
+            }
+        } else {
+            folded.push(e);
+        }
+    }
+    folded.push(json!({"type": "expandable_blockquote", "offset": split, "length": units.len() - split}));
+    folded
 }
 
 /// Dropping the Link stops both threads (the poller after its current getUpdates, at most ~60 s).
@@ -341,6 +426,13 @@ fn send_loop(agent: &ureq::Agent, token: &str, chat: &AtomicI64, tx: &Sender<Msg
                 ("sendMessage", b, session_id, tag)
             }
             Out::Answer { callback_id, text } => ("answerCallbackQuery", json!({"callback_query_id": callback_id, "text": text}), None, None),
+            Out::Edit { message_id, text, entities } => {
+                let id = chat.load(Ordering::Relaxed);
+                if id == 0 {
+                    continue;
+                }
+                ("editMessageText", json!({"chat_id": id, "message_id": message_id, "text": text, "entities": entities}), None, None)
+            }
         };
         for attempt in 0..3 {
             // A rejected format must not lose the answer: the last try goes out plain.
@@ -384,10 +476,44 @@ mod tests {
         assert_eq!(keyboard(&b(3)).iter().map(Vec::len).collect::<Vec<_>>(), vec![1, 1, 1]);
     }
 
+    fn quote(o: usize, l: usize) -> Value {
+        json!({"type": "expandable_blockquote", "offset": o, "length": l})
+    }
+
+    #[test]
+    fn fold_short_reply_has_no_quote() {
+        assert!(fold("a\nb", vec![]).is_empty());
+    }
+
+    #[test]
+    fn fold_quotes_after_first_paragraph() {
+        assert!(fold("r1\nr2\n\nmore\nmore", vec![]).contains(&quote(7, 9)));
+    }
+
+    #[test]
+    fn fold_caps_visible_at_three_lines() {
+        assert_eq!(fold("1\n2\n3\n4\n5", vec![]), vec![quote(6, 3)]);
+    }
+
+    #[test]
+    fn fold_never_splits_code() {
+        let (text, ents) = render("intro\n\n```\nl1\nl2\nl3\nl4\n```\n\nend");
+        let pre = ents.iter().find(|e| e["type"] == "pre").unwrap().clone();
+        let (po, pl) = (pre["offset"].as_u64().unwrap(), pre["length"].as_u64().unwrap());
+        let out = fold(&text, ents);
+        let q = out.iter().find(|e| e["type"] == "expandable_blockquote").unwrap();
+        assert!(q["offset"].as_u64().unwrap() <= po);
+        assert!(out.iter().filter(|e| e["type"] != "expandable_blockquote").all(|e| e == &pre || !(po < e["offset"].as_u64().unwrap() && e["offset"].as_u64().unwrap() < po + pl)));
+    }
+
     #[test]
     fn parse_button() {
-        let u = json!({"update_id": 2, "callback_query": {"id": "q", "data": "a:4", "message": {"chat": {"id": 5}, "date": 1800}}});
-        assert!(matches!(parse_update(&u), Some(Incoming::Button { chat: 5, date: 1800, .. })));
+        let u = json!({"update_id": 2, "callback_query": {"id": "q", "data": "a:4", "message": {"message_id": 9, "chat": {"id": 5}, "date": 1800, "text": "hi", "entities": [{"type":"bold","offset":0,"length":2}]}}});
+        let Some(Incoming::Button { chat: 5, date: 1800, tap, .. }) = parse_update(&u) else { panic!("no button") };
+        assert_eq!((tap.callback_id.as_str(), tap.message_id, tap.text.as_str(), tap.entities.len()), ("q", 9, "hi", 1));
+        let u = json!({"update_id": 2, "callback_query": {"id": "q", "data": "a:4", "message": {"message_id": 9, "chat": {"id": 5}, "date": 1800}}});
+        let Some(Incoming::Button { tap, .. }) = parse_update(&u) else { panic!("no button") };
+        assert_eq!(tap.text, "");
     }
 
     #[test]
@@ -481,6 +607,23 @@ mod tests {
         let placed = place(vec![e(MAX_CHARS - 1, 5), e(MAX_CHARS + 1, 2)], "", &body);
         assert_eq!(placed, vec![e(MAX_CHARS - 1, 1)]);
         assert_eq!(place((0..150).map(|i| e(i, 1)).collect(), "", &body).len(), MAX_ENTITIES);
+    }
+
+    #[test]
+    fn fold_drops_blockquote_inside_the_expandable_quote() {
+        let (text, ents) = render("intro\n\nmore\n\n> quoted\n\nend");
+        assert!(ents.iter().any(|e| e["type"] == "blockquote"));
+        let out = fold(&text, ents);
+        let q = out.iter().find(|e| e["type"] == "expandable_blockquote").unwrap();
+        let split = q["offset"].as_u64().unwrap();
+        assert!(out.iter().filter(|e| e["type"] == "blockquote").all(|e| e["offset"].as_u64().unwrap() + e["length"].as_u64().unwrap() <= split));
+    }
+
+    #[test]
+    fn cut_to_counts_utf16_units() {
+        assert_eq!(cut_to("ab😀cd", 4), "ab😀... (full answer in the terminal)");
+        assert_eq!(cut_to("ab😀cd", 3), "ab... (full answer in the terminal)");
+        assert_eq!("... (full answer in the terminal)".len(), CUT_SUFFIX);
     }
 
     #[test]

@@ -4,6 +4,22 @@ Each `## [x.y.z]` section is the release note for tag `vx.y.z`. The release work
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-11-21
+
+### Added
+- Telegram: phone commands `/open`, `/claude`, `/away` and `/help`. The bot listens while paired.
+- Telegram: while Away is on, agents answer in short Simplified Technical English.
+- Telegram: long answers show their first lines; the rest is in a tap-to-expand quote.
+- Telegram: the todo list shows in a code font below the answer.
+- Telegram: a typed message to an idle session gets `Sent to [repo]`.
+
+### Changed
+- Telegram: message headers read `[repo]` next to the colored circle, plus `· permission`, `· question` or `· error` when the agent needs you.
+- Telegram: prompts typed on the PC are no longer echoed to the phone.
+
+### Fixed
+- Telegram: buttons go away after one tap, and the message shows the outcome.
+
 ## [0.2.5] - 2026-11-18
 
 ### Added

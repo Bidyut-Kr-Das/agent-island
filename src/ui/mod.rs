@@ -146,17 +146,22 @@ impl Core {
                 if let crate::phone::Action::Away(on) = action {
                     self.set_away(on);
                     self.phone.say(if self.phone.away.load(Ordering::Relaxed) { "Away on" } else { "Away off" }, vec![]);
-                } else if let crate::phone::Action::Answer(id, r, callback_id) = action {
+                } else if let crate::phone::Action::Answer(id, r, tap) = action {
                     let text = if self.replies.contains_key(&id) {
+                        let o = match r {
+                            Reply::Allow => "Allowed",
+                            Reply::Deny => "Denied",
+                            _ => "Answered",
+                        };
                         self.answer(id, r);
-                        ""
+                        o
                     } else if self.phone.timed_out.contains(&id) {
                         "Too late, answered in the terminal"
                     } else {
                         "Already answered"
                     };
-                    if let Some(callback_id) = callback_id {
-                        self.phone.ack(callback_id, text);
+                    if let Some(tap) = tap {
+                        self.phone.settle(tap, text);
                     }
                 }
             }
@@ -852,7 +857,7 @@ mod tests {
             assert!(c.phone.asks.contains_key(&other_id) && c.replies.contains_key(&other_id), "other session untouched");
             assert!(matches!(other.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)));
             while orx.try_recv().is_ok() {}
-            c.handle(Msg::Phone(Incoming::Button { chat: 7, callback_id: "c".into(), data: format!("a:{id}"), date: i64::MAX }), 3);
+            c.handle(Msg::Phone(Incoming::Button { chat: 7, data: format!("a:{id}"), date: i64::MAX, tap: tap("c") }), 3);
             assert!(matches!(orx.try_recv(), Ok(Out::Answer { text, .. }) if text == "Too late, answered in the terminal"));
         }
     }
@@ -869,17 +874,22 @@ mod tests {
         c.handle(Msg::Timeout(late), 2);
         while orx.try_recv().is_ok() {}
         let tap = |c: &mut Core, data: String| {
-            c.handle(Msg::Phone(Incoming::Button { chat: 7, callback_id: "c".into(), data, date: i64::MAX }), 3);
+            c.handle(Msg::Phone(Incoming::Button { chat: 7, data, date: i64::MAX, tap: tap("c") }), 3);
             let Ok(Out::Answer { callback_id, text }) = orx.try_recv() else { panic!("no answer") };
             assert_eq!(callback_id, "c");
-            assert!(orx.try_recv().is_err(), "exactly one answer");
+            let Ok(Out::Edit { message_id: 9, text: edited, .. }) = orx.try_recv() else { panic!("no edit") };
+            assert_eq!(edited, format!("card\n{text}"));
+            assert!(orx.try_recv().is_err(), "exactly one answer and one edit");
             text
         };
-        assert_eq!(tap(&mut c, format!("a:{id}")), "");
+        assert_eq!(tap(&mut c, format!("a:{id}")), "Allowed");
         assert!(matches!(rx.try_recv(), Ok(Reply::Allow)));
         assert_eq!(tap(&mut c, format!("a:{id}")), "Already answered");
         assert_eq!(tap(&mut c, format!("a:{late}")), "Too late, answered in the terminal");
         assert_eq!(tap(&mut c, "a:999".into()), "Already answered");
+        let (_rx3, third) = event(&mut c, "PermissionRequest", "u", true).unwrap();
+        while orx.try_recv().is_ok() {}
+        assert_eq!(tap(&mut c, format!("d:{third}")), "Denied");
     }
 
     #[test]
@@ -892,7 +902,7 @@ mod tests {
         let (rx, id) = event(&mut c, "PermissionRequest", "s", true).unwrap();
         while orx.try_recv().is_ok() {}
         // A card of an earlier island run: its date is before this run started, whatever its req id.
-        c.handle(Msg::Phone(Incoming::Button { chat: 7, callback_id: "c".into(), data: format!("a:{id}"), date: 1 }), 3);
+        c.handle(Msg::Phone(Incoming::Button { chat: 7, data: format!("a:{id}"), date: 1, tap: tap("c") }), 3);
         assert!(rx.try_recv().is_err(), "live card must stay pending");
         assert!(c.replies.contains_key(&id));
         assert!(matches!(orx.try_recv(), Ok(Out::Answer { callback_id, text }) if callback_id == "c" && text == "Too late, answered in the terminal"));
@@ -906,6 +916,10 @@ mod tests {
         let (qtx, qrx) = channel();
         c.handle(Msg::Event { raw: r, chain: vec![], reply: Some((rtx, qtx)), token: None }, 1);
         (rrx, qrx.try_recv().unwrap())
+    }
+
+    fn tap(id: &str) -> crate::telegram::Tap {
+        crate::telegram::Tap { callback_id: id.into(), message_id: 9, text: "card".into(), entities: vec![] }
     }
 
     fn away_core() -> (Core, Receiver<crate::telegram::Out>) {
@@ -928,9 +942,7 @@ mod tests {
         assert!(c.replies.contains_key(&id));
         let Ok(Out::Send { tag, text, buttons, .. }) = orx.try_recv() else { panic!("no question") };
         assert_eq!(tag.as_deref(), Some(format!("q:{id}:0").as_str()));
-        assert!(text.ends_with(" X
-H
-Q?"), "{text}");
+        assert!(text.ends_with(" [X] · question\nH\nQ?"), "{text}");
         assert_eq!(buttons, vec![("A".to_owned(), format!("q:{id}:0:0")), ("B".to_owned(), format!("q:{id}:0:1"))]);
         assert!(orx.try_recv().is_err(), "no Waiting for you duplicate");
         c.handle(Msg::Sent { message_id: 9, session_id: "s".into(), tag }, 1);
@@ -970,7 +982,7 @@ Q?"), "{text}");
         let (_rx, id) = ask_event(&mut c, "s");
         c.set_away(false);
         while orx.try_recv().is_ok() {}
-        c.handle(Msg::Phone(Incoming::Button { chat: 7, callback_id: "c".into(), data: format!("a:{id}"), date: i64::MAX }), 3);
+        c.handle(Msg::Phone(Incoming::Button { chat: 7, data: format!("a:{id}"), date: i64::MAX, tap: tap("c") }), 3);
         assert!(matches!(orx.try_recv(), Ok(Out::Answer { text, .. }) if text == "Too late, answered in the terminal"));
     }
 
