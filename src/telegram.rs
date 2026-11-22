@@ -365,6 +365,10 @@ fn poll(agent: &ureq::Agent, token: &str, tx: &Sender<Msg>, stop: &AtomicBool) {
             if !named {
                 let me = call(agent, token, "getMe", &json!({}))?;
                 named = true;
+                // Replaces the / menu a previous app (e.g. openclaw) left on the bot. Private-chat scope wins over default, so set both.
+                for scope in ["default", "all_private_chats"] {
+                    let _ = call(agent, token, "setMyCommands", &json!({"commands": menu(), "scope": {"type": scope}}));
+                }
                 deliver(tx, Msg::Phone(Incoming::BotName(me["username"].as_str().unwrap_or_default().to_owned())));
             }
             // No long poll while failing, so a recovery clears the problem at once.
@@ -397,6 +401,15 @@ fn poll(agent: &ureq::Agent, token: &str, tx: &Sender<Msg>, stop: &AtomicBool) {
             }
         }
     }
+}
+
+/// Bot menu entries from the `/help` text, so the two never disagree.
+fn menu() -> Vec<Value> {
+    crate::command::HELP.lines().filter_map(|l| {
+        let (usage, about) = l.split_once(" - ")?;
+        let name = usage.strip_prefix('/')?.split(' ').next()?;
+        Some(json!({"command": name, "description": about}))
+    }).collect()
 }
 
 /// Allow/Deny share one row; longer button lists get one button per row so labels stay readable.
@@ -467,6 +480,13 @@ mod tests {
         assert_eq!(problem(&ureq::Error::StatusCode(404)), "bot token rejected");
         assert_eq!(problem(&ureq::Error::StatusCode(409)), "bot used by another app");
         assert_eq!(problem(&ureq::Error::StatusCode(502)), UNREACHABLE);
+    }
+
+    #[test]
+    fn menu_lists_every_help_command() {
+        let names: Vec<_> = menu().iter().map(|c| c["command"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(names, ["open", "claude", "away", "help"]);
+        assert!(menu().iter().all(|c| !c["description"].as_str().unwrap().is_empty()));
     }
 
     #[test]
