@@ -4,6 +4,11 @@ Each `## [x.y.z]` section is the release note for tag `vx.y.z`. The release work
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-11-22
+
+### Fixed
+- Telegram: the bot's `/` menu now lists `/open`, `/claude`, `/away` and `/help`, replacing commands another app left on the bot.
+
 ## [0.2.6] - 2026-11-21
 
 ### Added
