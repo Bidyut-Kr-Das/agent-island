@@ -32,6 +32,9 @@ fn hook_with(exe: &Path, pipe: &str, fixture: &str) {
     let mut child = Command::new(exe)
         .arg("hook")
         .env("AGENT_ISLANDS_PIPE", pipe)
+        // A paired phone keeps an island alive and messages the real chat: hide the dev's token and settings.
+        .env("APPDATA", env!("CARGO_TARGET_TMPDIR"))
+        .env_remove("CLAUDE_PLUGIN_OPTION_TELEGRAM_BOT_TOKEN")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
