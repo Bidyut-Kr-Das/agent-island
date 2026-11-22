@@ -5,7 +5,7 @@
     {
       "name": "agent-islands",
       "description": "Dynamic-island overlay for Claude Code sessions",
-      "source": { "source": "archive", "url": "https://github.com/Bidyut-Kr-Das/agent-island/releases/download/v0.2.5/agent-islands.zip", "sha256": "284eba4d4c10471d09fb1e7f8ef8c5f5f17840f7f82a29645565ee41f91568e4" }
+      "source": { "source": "archive", "url": "https://github.com/Bidyut-Kr-Das/agent-island/releases/download/v0.2.6/agent-islands.zip", "sha256": "5413d378e135b4618ab2731ef17ae9ab700cdf2e327d8b0a63a755ec7ac13c13" }
     }
   ]
 }
