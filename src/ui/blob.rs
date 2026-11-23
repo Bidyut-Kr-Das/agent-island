@@ -1,4 +1,4 @@
-use super::theme::{BG, OK, WARN};
+use super::theme::{BG, CROWN, OK, RUBY, WARN};
 use crate::state::{Finish, Status};
 use eframe::egui::{Color32, Painter, Pos2, Shape, Stroke, vec2};
 
@@ -8,6 +8,8 @@ pub enum BlobState {
     Working,
     Waiting,
     Done,
+    /// The island itself while the phone keeps it open with no sessions: still, crowned.
+    King,
 }
 
 impl BlobState {
@@ -113,6 +115,29 @@ pub fn paint_blob(p: &Painter, center_bottom: Pos2, size: f32, color: Color32, s
         BlobState::Done => {
             badge(OK, 1.0);
             line(vec![at(18.9, 4.6), at(20.0, 5.7), at(22.1, 3.4)], 1.1);
+        }
+        BlobState::King => {
+            // Crown in its own frame (base center at 0,0, y down), worn tilted ~20° on the right of the head.
+            let (sin, cos) = 0.35f32.sin_cos();
+            let c = |x: f32, y: f32| at(14.6 + x * cos - y * sin, 7.0 + x * sin + y * cos);
+            // egui fills convex shapes only: band plus three points, each drawn twice so a BG
+            // outline goes round the whole crown without seams between the pieces.
+            let parts: [&[(f32, f32)]; 4] = [
+                &[(-3.4, -2.0), (3.4, -2.0), (3.4, 0.4), (-3.4, 0.4)],
+                &[(-3.4, -1.6), (-1.0, -1.6), (-3.8, -5.0)],
+                &[(-1.8, -1.6), (1.8, -1.6), (0.0, -5.8)],
+                &[(1.0, -1.6), (3.4, -1.6), (3.8, -5.0)],
+            ];
+            let tips = [(-3.8, -5.0), (0.0, -5.8), (3.8, -5.0)];
+            for (fill, stroke) in [(BG, Stroke::new(1.6 * s, BG)), (CROWN, Stroke::NONE)] {
+                for part in parts {
+                    p.add(Shape::convex_polygon(part.iter().map(|&(x, y)| c(x, y)).collect(), fill, stroke));
+                }
+                for (x, y) in tips {
+                    p.circle_filled(c(x, y), if fill == BG { 1.2 } else { 0.6 } * s, fill);
+                }
+            }
+            p.circle_filled(c(0.0, -0.8), 0.75 * s, RUBY);
         }
         _ => {}
     }

@@ -8,7 +8,11 @@ pub const FG2: Color32 = Color32::from_rgb(0xb4, 0xb4, 0xbc);
 pub const FG3: Color32 = Color32::from_rgb(0x8a, 0x8a, 0x94);
 pub const OK: Color32 = Color32::from_rgb(0x2b, 0xd4, 0x5f);
 pub const WARN: Color32 = Color32::from_rgb(0xff, 0xb8, 0x00);
-pub const SESSION: [Color32; 6] = [
+/// King blob: gold body, paler crown, ruby jewel.
+pub const KING: Color32 = Color32::from_rgb(0xf5, 0xb5, 0x2e);
+pub const CROWN: Color32 = Color32::from_rgb(0xff, 0xe0, 0x7a);
+pub const RUBY: Color32 = Color32::from_rgb(0xff, 0x3d, 0x6b);
+pub const SESSION:[Color32; 6] = [
     Color32::from_rgb(0xff, 0x6b, 0x35),
     Color32::from_rgb(0x1e, 0x9b, 0xff),
     Color32::from_rgb(0xb8, 0x5c, 0xff),

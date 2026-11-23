@@ -95,6 +95,21 @@ pub fn replay(text: &str) -> Vec<Todo> {
     todos
 }
 
+/// True when the transcript past byte `since` (its length when the turn began) holds the line
+/// Claude Code writes on Esc. Esc sends no hook, so this is the only sign the turn ended.
+pub fn interrupted(path: &std::path::Path, since: u64) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    // Nothing follows the marker until the next prompt, so the tail is enough.
+    const TAIL: u64 = 16 * 1024;
+    let Ok(mut f) = std::fs::File::open(path) else { return false };
+    let len = f.metadata().map_or(0, |m| m.len());
+    let mut buf = Vec::new();
+    if f.seek(SeekFrom::Start(since.max(len.saturating_sub(TAIL)))).is_err() || f.take(TAIL).read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    String::from_utf8_lossy(&buf).contains(r#""type":"text","text":"[Request interrupted by user"#)
+}
+
 pub fn todo_change(ev: &HookEvent) -> Option<TodoChange> {
     let input = &ev.tool_input;
     let str_of = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
@@ -149,6 +164,21 @@ mod tests {
 
     fn todo(id: &str, subject: &str, status: TodoStatus) -> Todo {
         Todo { id: id.into(), subject: subject.into(), status }
+    }
+
+    #[test]
+    fn interrupted_sees_only_markers_after_turn_start() {
+        let path = std::env::temp_dir().join(format!("ai-interrupt-{}.jsonl", std::process::id()));
+        let old = "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user]\"}]}}\n";
+        let prompt = "{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n";
+        std::fs::write(&path, format!("{old}{prompt}")).unwrap();
+        let since = old.len() as u64;
+        assert!(!interrupted(&path, since), "marker from an earlier turn");
+        assert!(interrupted(&path, 0));
+        std::fs::write(&path, format!("{old}{prompt}{}", old.replace("user]", "user for tool use]"))).unwrap();
+        assert!(interrupted(&path, since));
+        std::fs::remove_file(&path).unwrap();
+        assert!(!interrupted(&path, 0), "missing file");
     }
 
     #[test]
