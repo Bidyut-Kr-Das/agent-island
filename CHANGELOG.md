@@ -4,6 +4,14 @@ Each `## [x.y.z]` section is the release note for tag `vx.y.z`. The release work
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-11-23
+
+### Added
+- A gold king blob fills the island while a paired phone keeps it open with no sessions. Click it for settings.
+
+### Fixed
+- Pressing Esc to stop a turn now stops the blob's bounce within about 3 s. Claude Code sends no hook on Esc, so the island reads the interrupt from the transcript.
+
 ## [0.2.7] - 2026-11-22
 
 ### Fixed
