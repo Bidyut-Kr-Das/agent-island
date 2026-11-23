@@ -21,6 +21,8 @@ pub enum Msg {
     Timeout(u64),
     /// Todos rebuilt from a session's transcript by a worker thread.
     Replay { session_id: String, todos: Vec<crate::state::Todo> },
+    /// A worker found the Esc marker in the transcript of the turn that began at byte `since`.
+    Interrupted { session_id: String, since: u64 },
     /// From the Telegram poller.
     Phone(crate::telegram::Incoming),
     /// A session's message was sent to Telegram as `message_id`.

@@ -272,6 +272,16 @@ impl State {
         }
     }
 
+    /// Esc in the terminal: Claude Code sends no Stop, so the island ends the turn itself. Idle, not
+    /// done: nothing finished.
+    pub fn interrupt(&mut self, session_id: &str) {
+        self.permissions.retain(|p| p.session_id != session_id);
+        if let Some(s) = self.sessions.iter_mut().find(|s| s.id == session_id) {
+            s.status = Status::Idle;
+            s.finished = None;
+        }
+    }
+
     /// A fresh request id, for work that has no permission card (held questions).
     pub fn next_id(&mut self) -> u64 {
         self.next_req += 1;
@@ -454,6 +464,17 @@ mod tests {
         go(&mut s, "Stop", "a", json!({}));
         assert_eq!(s.sessions[0].status, Status::Idle);
         assert_eq!(s.sessions[0].finished, Some(Finish::Ok));
+    }
+
+    #[test]
+    fn interrupt_sets_idle_and_drops_cards() {
+        let mut s = State::default();
+        go(&mut s, "UserPromptSubmit", "a", json!({}));
+        perm(&mut s, "a", "Bash");
+        s.interrupt("a");
+        assert_eq!(s.sessions[0].status, Status::Idle);
+        assert_eq!(s.sessions[0].finished, None);
+        assert!(s.permissions.is_empty());
     }
 
     #[test]

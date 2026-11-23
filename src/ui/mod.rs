@@ -23,6 +23,8 @@ pub struct Core {
     pub phone: crate::phone::Phone,
     empty_since: Option<Instant>,
     last_prune: Option<Instant>,
+    /// Session id to its transcript length at the last prompt: the turns watched for Esc.
+    turns: HashMap<String, u64>,
     tx: Sender<Msg>,
 }
 
@@ -31,7 +33,7 @@ const EXIT_AFTER_EMPTY: Duration = Duration::from_secs(3);
 
 impl Core {
     pub fn new(tx: Sender<Msg>) -> Core {
-        Core { state: State::default(), replies: HashMap::new(), phone: crate::phone::Phone::new(tx.clone()), empty_since: None, last_prune: None, tx }
+        Core { state: State::default(), replies: HashMap::new(), phone: crate::phone::Phone::new(tx.clone()), empty_since: None, last_prune: None, turns: HashMap::new(), tx }
     }
 
     pub fn handle(&mut self, msg: Msg, now: u64) {
@@ -87,6 +89,11 @@ impl Core {
                 // A turn ending also ends that session's held questions: the hook is gone, so a late tap or text must not reach them.
                 if matches!(ev.name.as_str(), "Stop" | "StopFailure" | "UserPromptSubmit") {
                     self.phone.drop_session_asks(&ev.session_id);
+                    self.turns.remove(&ev.session_id);
+                }
+                if ev.name == "UserPromptSubmit" && !ev.transcript_path.is_empty() {
+                    let len = std::fs::metadata(&ev.transcript_path).map_or(0, |m| m.len());
+                    self.turns.insert(ev.session_id.clone(), len);
                 }
                 // Dropping the Sender of a card the turn ended releases its waiting hook.
                 let perms = &self.state.permissions;
@@ -134,6 +141,17 @@ impl Core {
                 self.state.timeout(id);
             }
             Msg::Replay { session_id, todos } => self.state.set_todos(&session_id, todos),
+            // A new prompt since the check started replaced the turn: the marker is old news.
+            Msg::Interrupted { session_id, since } => {
+                if self.turns.get(&session_id) == Some(&since) {
+                    // Watched once: a message sent mid-turn follows the marker and the turn goes on.
+                    self.turns.remove(&session_id);
+                    self.state.interrupt(&session_id);
+                    self.phone.drop_session_asks(&session_id);
+                    let (perms, asks) = (&self.state.permissions, &self.phone.asks);
+                    self.replies.retain(|id, _| perms.iter().any(|p| p.req_id == *id) || asks.contains_key(id));
+                }
+            }
             Msg::Sent { message_id, session_id, tag } => {
                 self.phone.note_sent(message_id, tag.as_deref());
                 // An ended session's last message ("Ended") is not routable: a reply would show its uuid.
@@ -217,6 +235,23 @@ impl Core {
             self.phone.forget_gone(&self.state.sessions);
             let (perms, asks) = (&self.state.permissions, &self.phone.asks);
             self.replies.retain(|id, _| perms.iter().any(|p| p.req_id == *id) || asks.contains_key(id));
+            let sessions = &self.state.sessions;
+            self.turns.retain(|id, _| sessions.iter().any(|s| s.id == *id));
+            let watch: Vec<_> = sessions
+                .iter()
+                .filter(|s| s.status != crate::state::Status::Idle)
+                .filter_map(|s| Some((s.id.clone(), s.transcript.clone(), *self.turns.get(&s.id)?)))
+                .collect();
+            if !watch.is_empty() {
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    for (session_id, path, since) in watch {
+                        if event::interrupted(std::path::Path::new(&path), since) {
+                            let _ = tx.send(Msg::Interrupted { session_id, since });
+                        }
+                    }
+                });
+            }
         }
         if !self.state.is_empty() || self.listening() {
             self.empty_since = None;
@@ -665,6 +700,20 @@ mod tests {
 
     fn raw(name: &str, sid: &str) -> Value {
         json!({"hook_event_name": name, "session_id": sid, "cwd": r"D:\p\x", "transcript_path": "t.jsonl", "tool_name": "Bash", "tool_input": {"command": "ls"}})
+    }
+
+    #[test]
+    fn interrupt_ends_only_the_current_turn() {
+        let mut c = Core::new(channel().0);
+        event(&mut c, "UserPromptSubmit", "s", false);
+        let (rx, _) = event(&mut c, "PermissionRequest", "s", true).unwrap();
+        // t.jsonl does not exist: the turn began at byte 0.
+        c.handle(Msg::Interrupted { session_id: "s".into(), since: 5 }, 2);
+        assert_ne!(c.state.sessions[0].status, crate::state::Status::Idle, "stale check");
+        c.handle(Msg::Interrupted { session_id: "s".into(), since: 0 }, 2);
+        assert_eq!(c.state.sessions[0].status, crate::state::Status::Idle);
+        assert!(c.state.permissions.is_empty() && c.turns.is_empty());
+        assert!(matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)), "card's hook released");
     }
 
     #[test]
