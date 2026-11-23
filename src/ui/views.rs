@@ -5,7 +5,7 @@ use crate::state::{Finish, Permission, Session, Todo, TodoStatus, WaitKind};
 use std::collections::VecDeque;
 use std::hash::Hash;
 use super::blob::{BlobState, paint_blob};
-use super::theme::{BG, FG, FG2, FG3, LINE, OK, SESSION, WARN};
+use super::theme::{BG, FG, FG2, FG3, KING, LINE, OK, SESSION, WARN};
 use crate::hook::Reply;
 use crate::state::Status;
 use eframe::egui::text::{LayoutJob, TextFormat, TextWrapping};
@@ -81,6 +81,10 @@ pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, 
             let bar = Rect::from_min_size(pos2(bx, bottom - BLOB / 2.0 - 6.0), vec2(2.0, 12.0));
             p.rect_filled(bar, 1.0, FG);
         }
+    }
+    // A pill with no sessions is open only for the phone (pill_height above).
+    if core.state.sessions.is_empty() {
+        paint_blob(&clip, pos2(r.center().x, r.top() + 1.0 + PAD_Y + BLOB), BLOB, KING, BlobState::King, t);
     }
     resp
 }

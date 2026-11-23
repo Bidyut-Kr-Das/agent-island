@@ -420,8 +420,10 @@ impl eframe::App for App {
         if pill.secondary_clicked() {
             self.settings_open = !self.settings_open;
         }
-        // An empty pill (listening, no sessions) has nothing to select.
-        if pill.clicked() && !self.core.state.sessions.is_empty() {
+        // An empty pill (listening, no sessions) holds only the king: it opens settings.
+        if pill.clicked() && self.core.state.sessions.is_empty() {
+            self.settings_open = !self.settings_open;
+        } else if pill.clicked() {
             self.settings_open = false;
             let sessions = &self.core.state.sessions;
             let clicked = pill.interact_pointer_pos().and_then(|p| views::blob_at(p, pill.rect, sessions.len())).map(|i| &sessions[i]);
