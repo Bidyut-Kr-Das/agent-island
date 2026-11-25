@@ -124,9 +124,10 @@ pub fn todo_change(ev: &HookEvent) -> Option<TodoChange> {
             let subject = str_of(input, "subject");
             let raw_status = str_of(input, "status");
             match (subject, raw_status) {
-                (Some(subject), Some(s)) => {
-                    Some(TodoChange::Update(Todo { id, subject, status: status(&s)? }))
-                }
+                (Some(subject), Some(s)) => Some(match status(&s) {
+                    Some(status) => TodoChange::Update(Todo { id, subject, status }),
+                    None => TodoChange::Remove(id),
+                }),
                 (Some(subject), None) => Some(TodoChange::Rename { id, subject }),
                 (None, Some(s)) => Some(match status(&s) {
                     Some(status) => TodoChange::SetStatus { id, status },
@@ -250,6 +251,8 @@ mod tests {
             todo_change(&ev),
             Some(TodoChange::Update(todo("1", "New", TodoStatus::Completed)))
         );
+        ev.tool_input = serde_json::json!({"taskId": "1", "subject": "New", "status": "deleted"});
+        assert_eq!(todo_change(&ev), Some(TodoChange::Remove("1".into())));
     }
 
     #[test]

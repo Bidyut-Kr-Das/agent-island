@@ -87,6 +87,11 @@ pub fn is_alive(pid: u32) -> bool {
     .unwrap_or(false)
 }
 
+/// Alive and still `claude.exe` (the name `find_pids` keys on): a reused pid belongs to another program.
+pub fn is_claude(pid: u32) -> bool {
+    is_alive(pid) && with_process(pid, image_path).is_some_and(|p| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("claude.exe")))
+}
+
 fn image_path(h: HANDLE) -> Option<PathBuf> {
     let mut buf = [0u16; 1024];
     let mut len = buf.len() as u32;
@@ -163,6 +168,8 @@ mod tests {
     fn is_alive_self_true_and_bogus_false() {
         assert!(is_alive(std::process::id()));
         assert!(!is_alive(u32::MAX - 3));
+        assert!(!is_claude(std::process::id()), "alive, but not claude.exe: a reused pid");
+        assert!(!is_claude(u32::MAX - 3));
     }
 
     #[test]

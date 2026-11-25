@@ -12,7 +12,7 @@ const COMMANDS: &[&str] = &["rm", "rmdir", "del", "erase", "rd", "remove-item", 
 /// (`git -C "a b" -c k=v push`) can hide it. Over-gates `git log foo push`, by choice.
 /// `python -m pip install` and `uv pip install` are caught by the pip entry.
 const SUBCOMMANDS: &[(&str, &[&str])] = &[
-    ("git", &["commit", "push", "reset"]),
+    ("git", &["commit", "push", "reset", "clean"]),
     ("npm", &["install", "i", "add"]),
     ("pnpm", &["add", "install", "i"]),
     ("yarn", &["add", "install"]),
@@ -39,6 +39,12 @@ pub fn is_gated(tool: &str, command: &str) -> bool {
     if tool != "Bash" && tool != "PowerShell" {
         return false;
     }
+    // Quotes and escapes inside a word (`pu""sh`, `r\m`, ``r`m``) do not change what the shell runs.
+    let bare: String = command.chars().filter(|c| !"\"'\\`".contains(*c)).collect();
+    [command, bare.as_str()].into_iter().any(gated_words)
+}
+
+fn gated_words(command: &str) -> bool {
     let words: Vec<String> = command
         .split(|c: char| c.is_whitespace() || ";&|(){}<>`$\"',".contains(c))
         .map(normalize)
@@ -151,6 +157,8 @@ mod tests {
             r#"git -c user.name="A B" commit"#, r#"npm --prefix "my dir" install"#,
             // other forms
             "uv pip install x", "python3 -m pip install x",
+            // quotes and escapes inside a word
+            "git pu\"\"sh", "g''it push", "r\\m -rf x", "r`m x", "Remove-I''tem x", "git clean -fdx",
         ] {
             assert!(g(c), "{c:?}");
         }

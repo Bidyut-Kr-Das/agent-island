@@ -1,4 +1,4 @@
-use crate::{gate, pipe, procs};
+use crate::{detail, gate, pipe, procs};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::process::CommandExt;
@@ -22,10 +22,8 @@ pub enum Reply {
     Answer(Value),
 }
 
-pub fn decision_output(reply: Option<Reply>, verified: bool) -> Option<String> {
-    if !verified {
-        return None;
-    }
+/// The island was verified by `connect_island` before any reply reaches the output functions.
+pub fn decision_output(reply: Option<Reply>) -> Option<String> {
     let decision = match reply? {
         Reply::Allow => r#"{"behavior":"allow"}"#,
         Reply::Deny | Reply::Rearm | Reply::Answer(_) => r#"{"behavior":"deny","message":"Denied from Agent Islands"}"#,
@@ -36,20 +34,36 @@ pub fn decision_output(reply: Option<Reply>, verified: bool) -> Option<String> {
 }
 
 /// Gated PreToolUse (spec 9a): always prints a decision; allow only with a verified island and a click.
-pub fn pretool_output(reply: Option<Reply>, verified: bool, timed_out: bool) -> String {
+pub fn pretool_output(reply: Option<Reply>, timed_out: bool) -> String {
     let deny = |why: &str| format!(r#""deny","permissionDecisionReason":"{why}""#);
-    let decision = match (verified, reply) {
-        (true, Some(Reply::Allow)) => r#""allow""#.to_owned(),
-        (true, Some(Reply::Deny | Reply::Rearm | Reply::Answer(_))) => deny("Denied from Agent Islands"),
-        (true, None) if timed_out => deny("No answer in Agent Islands in time"),
-        _ => deny("Agent Islands is not running"),
+    let decision = match reply {
+        Some(Reply::Allow) => r#""allow""#.to_owned(),
+        Some(Reply::Deny | Reply::Rearm | Reply::Answer(_)) => deny("Denied from Agent Islands"),
+        None if timed_out => deny("No answer in Agent Islands in time"),
+        None => deny("Agent Islands is not running"),
     };
     format!(r#"{{"hookSpecificOutput":{{"hookEventName":"PreToolUse","permissionDecision":{decision}}}}}"#)
 }
 
+/// Allow on a gated command that the card showed only in part: Claude Code's own prompt shows all of it.
+const PRE_ASK: &str = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"Agent Islands showed only part of this command"}}"#;
+
+/// The card's detail line is the whole command (one line, not truncated).
+fn shown_whole(event: &Value) -> bool {
+    let (tool, input) = (event["tool_name"].as_str().unwrap_or_default(), &event["tool_input"]);
+    detail::detail_line(tool, input, None).1 == detail::full_line(tool, input, None).1
+}
+
+fn gated_output(d: &Option<Value>, event: &Value) -> String {
+    match to_reply(d) {
+        Some(Reply::Allow) if !shown_whole(event) => PRE_ASK.to_owned(),
+        r => pretool_output(r, decision(d) == Some("timeout")),
+    }
+}
+
 /// A held AskUserQuestion: the island's answers skip the dialog; anything else prints nothing.
-fn ask_output(reply: Option<Reply>, verified: bool, event: &Value) -> Option<String> {
-    let (true, Some(Reply::Answer(answers))) = (verified, reply) else { return None };
+fn ask_output(reply: Option<Reply>, event: &Value) -> Option<String> {
+    let Some(Reply::Answer(answers)) = reply else { return None };
     let out = json!({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
         "updatedInput": {"questions": event["tool_input"]["questions"], "answers": answers}}});
     Some(out.to_string())
@@ -217,12 +231,30 @@ fn needs_chain(event: &Value, spawned: bool) -> bool {
 
 /// Forwards the hook event; returns the stdout text to print, if any.
 fn run_with(name: &str, spawn: bool, input: &str) -> Option<String> {
-    let event: Value = serde_json::from_str(input).ok()?;
+    let mut event: Value = serde_json::from_str(input).ok()?;
     let gated = event["hook_event_name"] == "PreToolUse"
         && gate::is_gated(event["tool_name"].as_str().unwrap_or_default(), event["tool_input"]["command"].as_str().unwrap_or_default());
+    trim(&mut event, gated);
     let token = std::env::var("CLAUDE_PLUGIN_OPTION_TELEGRAM_BOT_TOKEN").ok();
     let out = forward_with_token(name, spawn, event, gated, token.as_deref());
-    if gated { Some(out.unwrap_or_else(|| pretool_output(None, false, false))) } else { out }
+    if gated { Some(out.unwrap_or_else(|| pretool_output(None, false))) } else { out }
+}
+
+/// The island reads `tool_response` only for TaskCreate and `tool_input` only for todos, questions
+/// and cards, so a big Read result or Write content does not cross the pipe.
+fn trim(event: &mut Value, gated: bool) {
+    let tool = event["tool_name"].as_str().unwrap_or_default();
+    let keep_response = tool == "TaskCreate";
+    let keep_input = gated
+        || matches!(tool, "TaskCreate" | "TaskUpdate" | "TodoWrite" | "AskUserQuestion")
+        || event["hook_event_name"] == "PermissionRequest";
+    let Some(o) = event.as_object_mut() else { return };
+    if !keep_response {
+        o.remove("tool_response");
+    }
+    if !keep_input {
+        o.remove("tool_input");
+    }
 }
 
 /// `token`: the Telegram bot token option; Some("") means the user turned the phone link off.
@@ -251,16 +283,15 @@ fn forward_with_token(name: &str, spawn: bool, event: Value, gated: bool, token:
     }
     let wait = Duration::from_secs(605);
     if gated {
-        let d = read_reply(f, wait);
-        return Some(pretool_output(to_reply(&d), true, decision(&d) == Some("timeout")));
+        return Some(gated_output(&read_reply(f, wait), &event));
     }
     if ask {
-        return ask_output(to_reply(&read_reply(f, wait)), true, &event);
+        return ask_output(to_reply(&read_reply(f, wait)), &event);
     }
     if !wants_reply {
         return None;
     }
-    decision_output(to_reply(&read_reply(f, wait)), true)
+    decision_output(to_reply(&read_reply(f, wait)))
 }
 
 pub fn run() -> i32 {
@@ -285,25 +316,36 @@ mod tests {
     const ALLOW: &str = r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}"#;
 
     #[test]
+    fn trim_keeps_only_fields_the_island_reads() {
+        let t = |name: &str, tool: &str, gated: bool| {
+            let mut e = json!({"hook_event_name": name, "tool_name": tool, "tool_input": {"a": 1}, "tool_response": {"b": 2}});
+            trim(&mut e, gated);
+            (e.get("tool_input").is_some(), e.get("tool_response").is_some())
+        };
+        assert_eq!(t("PostToolUse", "Read", false), (false, false));
+        assert_eq!(t("PreToolUse", "Write", false), (false, false));
+        assert_eq!(t("PostToolUse", "TaskCreate", false), (true, true));
+        assert_eq!(t("PostToolUse", "TaskUpdate", false), (true, false));
+        assert_eq!(t("PostToolUse", "TodoWrite", false), (true, false));
+        assert_eq!(t("PreToolUse", "AskUserQuestion", false), (true, false));
+        assert_eq!(t("PermissionRequest", "Write", false), (true, false));
+        assert_eq!(t("PreToolUse", "Bash", true), (true, false));
+    }
+
+    #[test]
     fn allow_verified_prints_allow_json() {
-        assert_eq!(decision_output(Some(Reply::Allow), true).as_deref(), Some(ALLOW));
+        assert_eq!(decision_output(Some(Reply::Allow)).as_deref(), Some(ALLOW));
     }
 
     #[test]
     fn deny_verified_prints_deny_with_message() {
         let want = r#"{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","message":"Denied from Agent Islands"}}}"#;
-        assert_eq!(decision_output(Some(Reply::Deny), true).as_deref(), Some(want));
-    }
-
-    #[test]
-    fn unverified_prints_nothing() {
-        assert_eq!(decision_output(Some(Reply::Allow), false), None);
-        assert_eq!(decision_output(Some(Reply::Deny), false), None);
+        assert_eq!(decision_output(Some(Reply::Deny)).as_deref(), Some(want));
     }
 
     #[test]
     fn no_reply_prints_nothing() {
-        assert_eq!(decision_output(None, true), None);
+        assert_eq!(decision_output(None), None);
     }
 
     #[test]
@@ -481,7 +523,7 @@ mod tests {
     #[test]
     fn gated_allow_verified_prints_pretool_allow() {
         let want = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}"#;
-        assert_eq!(pretool_output(Some(Reply::Allow), true, false), want);
+        assert_eq!(pretool_output(Some(Reply::Allow), false), want);
         let name = format!(r"\\.\pipe\ai-test-gallow-{}", std::process::id());
         let t = serve(&name, Some("{\"decision\":\"allow\"}\n"));
         assert_eq!(run_with(&name, false, GATED).as_deref(), Some(want));
@@ -490,8 +532,18 @@ mod tests {
     }
 
     #[test]
+    fn gated_allow_of_partly_shown_command_asks() {
+        let allow = Some(json!({"decision": "allow"}));
+        let ev = |c: &str| json!({"tool_name": "Bash", "tool_input": {"command": c}});
+        assert_eq!(gated_output(&allow, &ev("git push\nrm -rf ~")), PRE_ASK);
+        assert_eq!(gated_output(&allow, &ev(&format!("git push {}", "x".repeat(80)))), PRE_ASK);
+        assert!(gated_output(&allow, &ev("git push")).contains(r#""allow""#));
+        assert!(gated_output(&Some(json!({"decision": "deny"})), &ev("git push\nx")).contains(r#""deny""#));
+    }
+
+    #[test]
     fn gated_deny_prints_reason() {
-        assert_eq!(pretool_output(Some(Reply::Deny), true, false), pre_deny("Denied from Agent Islands"));
+        assert_eq!(pretool_output(Some(Reply::Deny), false), pre_deny("Denied from Agent Islands"));
         let name = format!(r"\\.\pipe\ai-test-gdeny-{}", std::process::id());
         let t = serve(&name, Some("{\"decision\":\"deny\"}\n"));
         assert_eq!(run_with(&name, false, GATED), Some(pre_deny("Denied from Agent Islands")));
@@ -500,9 +552,9 @@ mod tests {
 
     #[test]
     fn gated_timeout_reason_is_in_time() {
-        assert!(pretool_output(None, true, true).contains("No answer in Agent Islands in time"));
+        assert!(pretool_output(None, true).contains("No answer in Agent Islands in time"));
         let want = pre_deny("No answer in Agent Islands in time");
-        assert_eq!(pretool_output(None, true, true), want);
+        assert_eq!(pretool_output(None, true), want);
         let name = format!(r"\\.\pipe\ai-test-gtimeout-{}", std::process::id());
         let t = serve(&name, Some("{\"decision\":\"timeout\"}\n"));
         assert_eq!(run_with(&name, false, GATED), Some(want));
@@ -535,10 +587,7 @@ mod tests {
     #[test]
     fn gated_unverified_or_unreachable_prints_deny_not_running() {
         let want = pre_deny("Agent Islands is not running");
-        assert_eq!(pretool_output(Some(Reply::Allow), false, false), want);
-        assert_eq!(pretool_output(Some(Reply::Deny), false, false), want);
-        assert_eq!(pretool_output(None, false, true), want);
-        assert_eq!(pretool_output(None, true, false), want, "connection broke without a reply");
+        assert_eq!(pretool_output(None, false), want, "connection broke without a reply");
         let name = format!(r"\\.\pipe\ai-test-gnobody-{}", std::process::id());
         assert_eq!(run_with(&name, false, GATED), Some(want.clone()));
         let name = format!(r"\\.\pipe\ai-test-gbroke-{}", std::process::id());

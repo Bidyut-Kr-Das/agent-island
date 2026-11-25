@@ -59,7 +59,7 @@ pub fn hit(p: Pos2, r: Rect) -> bool {
 
 /// `away`: Away mode is on, the outline turns amber so the user sees everything goes to the phone.
 pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, away: bool, t: f64) -> egui::Response {
-    let h = ui.ctx().animate_value_with_time(Id::unique("pill_h"), pill_height(core.state.sessions.len().max(core.listening() as usize)), 0.25);
+    let h = ui.ctx().animate_value_with_time(Id::unique("pill_h"), pill_height(core.state.sessions.len() + core.listening() as usize), 0.25);
     let r = Rect::from_min_size(pos2(pill_x(side), MARGIN), vec2(PILL_W, h));
     let resp = ui.allocate_rect(r, Sense::click());
     if r.height() < 1.0 {
@@ -82,9 +82,10 @@ pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, 
             p.rect_filled(bar, 1.0, FG);
         }
     }
-    // A pill with no sessions is open only for the phone (pill_height above).
-    if core.state.sessions.is_empty() {
-        paint_blob(&clip, pos2(r.center().x, r.top() + 1.0 + PAD_Y + BLOB), BLOB, KING, BlobState::King, t);
+    // While the phone listens, the king sits in the last slot, below the sessions (pill_height above).
+    if core.listening() {
+        let n = core.state.sessions.len() as f32;
+        paint_blob(&clip, pos2(r.center().x, r.top() + 1.0 + PAD_Y + (n + 1.0) * BLOB + n * GAP), BLOB, KING, BlobState::King, t);
     }
     resp
 }
@@ -442,11 +443,21 @@ pub struct Arming {
     pub entered: bool,
     /// Cursor position last frame.
     last: Option<Pos2>,
+    /// Card top last frame: a card that moved (a session above it ended) starts arming again.
+    pub top: Option<f32>,
 }
 
 impl Arming {
     pub fn new(req: u64, appeared: f64, over: bool, cursor: Option<Pos2>) -> Arming {
-        Arming { req, appeared, outside: !over, entered: false, last: cursor }
+        Arming { req, appeared, outside: !over, entered: false, last: cursor, top: None }
+    }
+
+    /// The arming for card `req` at `top` this frame: a new one if the card changed or moved.
+    pub fn next(prev: Option<Arming>, req: u64, top: f32, t: f64, over: bool, cursor: Option<Pos2>) -> Arming {
+        let mut a = prev.filter(|a| a.req == req && a.top.is_none_or(|y| y == top)).unwrap_or(Arming::new(req, t, over, cursor));
+        a.top = Some(top);
+        a.update(over, cursor);
+        a
     }
 
     /// Feeds whether the cursor is over the card this frame, and where it is. Coming over the card
@@ -515,6 +526,18 @@ pub enum View {
     Panel,
     Permission(u64),
     Waiting(String),
+}
+
+/// 30 fps while something moves. Nothing moving: input and pipe messages wake the UI; one frame per
+/// prune interval keeps pruning and the exit-when-empty timer going.
+pub fn repaint_every(panel: Rect, finished_only: bool, sessions: &[Session]) -> std::time::Duration {
+    let busy = sessions.iter().any(|s| matches!(s.status, Status::Working | Status::Waiting(_)));
+    if (panel.is_positive() && !finished_only) || busy { std::time::Duration::from_millis(33) } else { super::PRUNE_EVERY }
+}
+
+/// Only these views can show settings; a card above them hides settings until it closes.
+pub fn shows_settings(view: &View) -> bool {
+    matches!(view, View::Panel | View::Pill)
 }
 
 /// Oldest pending permission, then any waiting session, then the panel if expanded, else the bare pill.
@@ -825,6 +848,25 @@ mod tests {
     }
 
     #[test]
+    fn finished_pill_alone_repaints_slowly() {
+        let fast = std::time::Duration::from_millis(33);
+        let r = Rect::from_min_size(pos2(50.0, 8.0), vec2(100.0, 24.0));
+        let idle = [sess_with(Status::Idle, vec![])];
+        assert_eq!(repaint_every(r, true, &idle), super::super::PRUNE_EVERY, "finished pill only");
+        assert_eq!(repaint_every(Rect::NOTHING, false, &idle), super::super::PRUNE_EVERY, "bare pill");
+        assert_eq!(repaint_every(r, false, &idle), fast, "panel or card open");
+        assert_eq!(repaint_every(r, true, &[sess_with(Status::Working, vec![])]), fast, "a working blob bounces");
+    }
+
+    #[test]
+    fn settings_show_only_without_a_card() {
+        assert!(shows_settings(&View::Pill));
+        assert!(shows_settings(&View::Panel));
+        assert!(!shows_settings(&View::Permission(1)));
+        assert!(!shows_settings(&View::Waiting("a".into())));
+    }
+
+    #[test]
     fn idle_session_rows_show_todos_not_idle() {
         let s = sess_with(Status::Idle, vec![todo("a", TodoStatus::Completed), todo("b", TodoStatus::Pending), todo("c", TodoStatus::Completed)]);
         let rows = panel_rows(&s, &PhoneStatus::Off);
@@ -1121,6 +1163,19 @@ mod tests {
         assert!(a.entered, "a real leave and re-enter arms");
         a.update(true, at(60.0));
         assert!(a.entered, "resting on the button after entering stays armed");
+    }
+
+    #[test]
+    fn card_that_moves_after_entered_is_not_armed() {
+        let a = Arming::next(None, 1, 100.0, 10.0, false, at(0.0));
+        let a = Arming::next(Some(a), 1, 100.0, 10.1, true, at(60.0));
+        assert!(a.entered);
+        // A session above ended: the card moved up 30 px under the still cursor.
+        let a = Arming::next(Some(a), 1, 70.0, 11.0, true, at(60.0));
+        assert!(!a.entered);
+        assert_eq!(a.appeared, 11.0);
+        let a = Arming::next(Some(a), 1, 70.0, 11.1, true, at(60.0));
+        assert!(!a.entered, "same place next frame keeps the new arming");
     }
 
     #[test]
