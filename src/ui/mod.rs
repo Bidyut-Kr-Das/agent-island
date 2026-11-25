@@ -96,9 +96,7 @@ impl Core {
                     self.turns.insert(ev.session_id.clone(), len);
                 }
                 // Dropping the Sender of a card the turn ended releases its waiting hook.
-                let perms = &self.state.permissions;
-                let asks = &self.phone.asks;
-                self.replies.retain(|id, _| perms.iter().any(|p| p.req_id == *id) || asks.contains_key(id));
+                self.release_dead();
                 // Any other reply without an id (a question that is not held) drops its senders: the server writes skip.
                 if let Some((reply, req)) = reply {
                     if let Some(id) = id {
@@ -148,8 +146,7 @@ impl Core {
                     self.turns.remove(&session_id);
                     self.state.interrupt(&session_id);
                     self.phone.drop_session_asks(&session_id);
-                    let (perms, asks) = (&self.state.permissions, &self.phone.asks);
-                    self.replies.retain(|id, _| perms.iter().any(|p| p.req_id == *id) || asks.contains_key(id));
+                    self.release_dead();
                 }
             }
             Msg::Sent { message_id, session_id, tag } => {
@@ -187,6 +184,12 @@ impl Core {
     }
 
     /// Away can be on only while paired. Turning it off releases everything waiting.
+    /// Drops the reply Senders of cards and held questions that are gone, which releases their waiting hooks.
+    fn release_dead(&mut self) {
+        let (perms, asks) = (&self.state.permissions, &self.phone.asks);
+        self.replies.retain(|id, _| perms.iter().any(|p| p.req_id == *id) || asks.contains_key(id));
+    }
+
     pub fn set_away(&mut self, on: bool) {
         if on && self.phone.chat.load(Ordering::Relaxed) == 0 {
             return;
@@ -230,11 +233,10 @@ impl Core {
     pub fn tick(&mut self, now: Instant, now_ms: u64) -> bool {
         if self.last_prune.is_none_or(|t| now.duration_since(t) >= PRUNE_EVERY) {
             self.last_prune = Some(now);
-            self.state.prune(procs::is_alive, now_ms);
+            self.state.prune(procs::is_claude, now_ms);
             // Pruned sessions never send SessionEnd: drop their phone state and release their held questions.
             self.phone.forget_gone(&self.state.sessions);
-            let (perms, asks) = (&self.state.permissions, &self.phone.asks);
-            self.replies.retain(|id, _| perms.iter().any(|p| p.req_id == *id) || asks.contains_key(id));
+            self.release_dead();
             let sessions = &self.state.sessions;
             self.turns.retain(|id, _| sessions.iter().any(|s| s.id == *id));
             let watch: Vec<_> = sessions
@@ -286,11 +288,6 @@ pub(crate) fn wake() {
 /// Runs the island until every session is gone. Returns at once if another island owns the pipe.
 pub fn run() {
     let (tx, rx) = std::sync::mpsc::channel();
-    let wake = || {
-        if let Some(c) = CTX.get() {
-            c.request_repaint();
-        }
-    };
     let away = Arc::new(AtomicBool::new(false));
     if crate::server::spawn(tx.clone(), wake, away.clone()).is_err() {
         return;
@@ -417,14 +414,18 @@ impl eframe::App for App {
             _ => self.selected.clone(),
         };
         let pill = views::pill(ui, &self.core, marked.as_deref(), self.side, self.core.phone.away.load(Ordering::Relaxed), t);
-        if pill.secondary_clicked() {
+        // Settings show only in these views: a toggle under a card would pop settings open after it.
+        let can_settings = views::shows_settings(&view);
+        if pill.secondary_clicked() && can_settings {
             self.settings_open = !self.settings_open;
         }
         // The king (last slot while listening) opens settings.
         let n = self.core.state.sessions.len();
         let slot = pill.interact_pointer_pos().and_then(|p| views::blob_at(p, pill.rect, n + self.core.listening() as usize));
         if pill.clicked() && (n == 0 || slot == Some(n)) {
-            self.settings_open = !self.settings_open;
+            if can_settings {
+                self.settings_open = !self.settings_open;
+            }
         } else if pill.clicked() {
             self.settings_open = false;
             let sessions = &self.core.state.sessions;
@@ -440,17 +441,15 @@ impl eframe::App for App {
         let cursor = win::cursor(self.hwnd, ctx.pixels_per_point());
         let (pressed, start) = ui.input(|i| (i.pointer.any_pressed(), i.pointer.press_start_time()));
         self.press_at = views::press_time(self.press_at, pressed, start, t);
+        // The finished pill does not animate: it alone needs no fast repaint.
+        let mut finished_only = false;
         let (panel, radius) = match view {
             View::Permission(id) => {
                 let shown = self.arming.filter(|a| a.req == id).is_some_and(|a| views::armed(a.appeared, t, a.entered));
                 let (rect, mut reply) = views::permission_card(ui, &self.core, id, shown, r, self.side, t);
                 let over = cursor.is_some_and(|p| rect.contains(p));
-                let a = self.arming.get_or_insert(views::Arming::new(id, t, over, cursor));
-                if a.req != id {
-                    *a = views::Arming::new(id, t, over, cursor);
-                }
-                a.update(over, cursor);
-                let a = *a;
+                let a = views::Arming::next(self.arming, id, rect.top(), t, over, cursor);
+                self.arming = Some(a);
                 if !views::armed(a.appeared, self.press_at, a.entered) {
                     reply = None;
                 }
@@ -497,6 +496,7 @@ impl eframe::App for App {
                 if panel.is_positive() {
                     (panel, 8.0)
                 } else {
+                    finished_only = true;
                     let (rect, open) = views::finished_pill(ui, &self.core, r, self.side);
                     if let Some(id) = open {
                         self.open_finished(id);
@@ -525,10 +525,7 @@ impl eframe::App for App {
             self.settings_open = false;
         }
         self.was_down = down;
-        let moving = panel.is_positive() || self.core.state.sessions.iter().any(|s| matches!(s.status, crate::state::Status::Working | crate::state::Status::Waiting(_)));
-        // Nothing moving: input and pipe messages wake the UI; one frame per prune interval keeps
-        // pruning and the exit-when-empty timer going.
-        ctx.request_repaint_after(if moving { Duration::from_millis(33) } else { PRUNE_EVERY });
+        ctx.request_repaint_after(views::repaint_every(panel, finished_only, &self.core.state.sessions));
     }
 }
 
