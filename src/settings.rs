@@ -13,24 +13,28 @@ pub fn path() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("APPDATA")?).join("agent-islands").join("settings.json"))
 }
 
+/// The settings object; missing, unreadable or non-object content is `{}`.
+fn read(path: &Path) -> serde_json::Value {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .filter(|v: &serde_json::Value| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
 /// Anything missing or unreadable is Left.
 pub fn load_from(path: &Path) -> Side {
-    let v: Option<serde_json::Value> = std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok());
-    match v.as_ref().and_then(|v| v["side"].as_str()) {
-        Some("right") => Side::Right,
-        _ => Side::Left,
-    }
+    if read(path)["side"] == "right" { Side::Right } else { Side::Left }
 }
 
 /// Anything missing or unreadable is None.
 pub fn load_chat(path: &Path) -> Option<i64> {
-    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    v["phone_chat"].as_i64()
+    read(path)["phone_chat"].as_i64()
 }
 
 /// Anything missing or unreadable is false.
 pub fn load_away(path: &Path) -> bool {
-    std::fs::read(path).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).is_some_and(|v| v["away"] == true)
+    read(path)["away"] == true
 }
 
 /// Replaces one key and keeps the rest. Unreadable or non-object content starts from `{}`.
@@ -38,13 +42,12 @@ pub fn set(path: &Path, key: &str, value: serde_json::Value) -> std::io::Result<
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut v: serde_json::Value = std::fs::read(path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .filter(|v: &serde_json::Value| v.is_object())
-        .unwrap_or_else(|| serde_json::json!({}));
+    let mut v = read(path);
     v[key] = value;
-    std::fs::write(path, v.to_string())
+    // Write then rename: a crash mid-write leaves the old file whole, not an empty one.
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, v.to_string())?;
+    std::fs::rename(&tmp, path)
 }
 
 pub fn save_to(path: &Path, side: Side) -> std::io::Result<()> {
@@ -97,8 +100,7 @@ pub fn unprotect(hex: &str) -> Option<String> {
 
 /// Reads `phone_token` and decrypts it.
 pub fn load_token(path: &Path) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
-    unprotect(v["phone_token"].as_str()?)
+    unprotect(read(path)["phone_token"].as_str()?)
 }
 
 /// `Some` writes the quoted exe path under HKCU Run; `None` removes it (missing is success).
@@ -150,8 +152,10 @@ pub fn autostart(path: &Path, token: Option<&str>) {
 fn autostart_with(path: &Path, token: Option<&str>, run_name: &str, exe: Option<&Path>) {
     match token.filter(|t| !t.is_empty()).and_then(protect) {
         Some(hex) => {
-            let _ = set(path, "phone_token", hex.into());
-            if let Some(exe) = exe {
+            // No login entry without a stored token: the island would start unpaired at login.
+            if set(path, "phone_token", hex.into()).is_ok()
+                && let Some(exe) = exe
+            {
                 set_run(run_name, Some(exe));
             }
         }
@@ -251,6 +255,17 @@ mod tests {
         assert_eq!(load_from(&p), Side::Right);
         save_to(&p, Side::Left).unwrap();
         assert_eq!(load_from(&p), Side::Left);
+    }
+
+    #[test]
+    fn set_replaces_whole_file_and_keeps_other_keys() {
+        let p = tmp("atomic");
+        set(&p, "phone_chat", 5.into()).unwrap();
+        save_to(&p, Side::Right).unwrap();
+        assert_eq!(load_chat(&p), Some(5));
+        assert_eq!(load_from(&p), Side::Right);
+        assert!(!p.with_extension("json.tmp").exists(), "the temp file is renamed, not left behind");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 
     #[test]
