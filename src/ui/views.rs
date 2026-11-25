@@ -59,7 +59,7 @@ pub fn hit(p: Pos2, r: Rect) -> bool {
 
 /// `away`: Away mode is on, the outline turns amber so the user sees everything goes to the phone.
 pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, away: bool, t: f64) -> egui::Response {
-    let h = ui.ctx().animate_value_with_time(Id::unique("pill_h"), pill_height(core.state.sessions.len().max(core.listening() as usize)), 0.25);
+    let h = ui.ctx().animate_value_with_time(Id::unique("pill_h"), pill_height(core.state.sessions.len() + core.listening() as usize), 0.25);
     let r = Rect::from_min_size(pos2(pill_x(side), MARGIN), vec2(PILL_W, h));
     let resp = ui.allocate_rect(r, Sense::click());
     if r.height() < 1.0 {
@@ -82,9 +82,10 @@ pub fn pill(ui: &mut egui::Ui, core: &Core, selected: Option<&str>, side: Side, 
             p.rect_filled(bar, 1.0, FG);
         }
     }
-    // A pill with no sessions is open only for the phone (pill_height above).
-    if core.state.sessions.is_empty() {
-        paint_blob(&clip, pos2(r.center().x, r.top() + 1.0 + PAD_Y + BLOB), BLOB, KING, BlobState::King, t);
+    // While the phone listens, the king sits in the last slot, below the sessions (pill_height above).
+    if core.listening() {
+        let n = core.state.sessions.len() as f32;
+        paint_blob(&clip, pos2(r.center().x, r.top() + 1.0 + PAD_Y + (n + 1.0) * BLOB + n * GAP), BLOB, KING, BlobState::King, t);
     }
     resp
 }

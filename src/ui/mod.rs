@@ -420,13 +420,15 @@ impl eframe::App for App {
         if pill.secondary_clicked() {
             self.settings_open = !self.settings_open;
         }
-        // An empty pill (listening, no sessions) holds only the king: it opens settings.
-        if pill.clicked() && self.core.state.sessions.is_empty() {
+        // The king (last slot while listening) opens settings.
+        let n = self.core.state.sessions.len();
+        let slot = pill.interact_pointer_pos().and_then(|p| views::blob_at(p, pill.rect, n + self.core.listening() as usize));
+        if pill.clicked() && (n == 0 || slot == Some(n)) {
             self.settings_open = !self.settings_open;
         } else if pill.clicked() {
             self.settings_open = false;
             let sessions = &self.core.state.sessions;
-            let clicked = pill.interact_pointer_pos().and_then(|p| views::blob_at(p, pill.rect, sessions.len())).map(|i| &sessions[i]);
+            let clicked = slot.map(|i| &sessions[i]);
             if let Some(s) = clicked.filter(|s| BlobState::of(s.status, s.finished) == BlobState::Done) {
                 let id = s.id.clone();
                 self.open_finished(id);
