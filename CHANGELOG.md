@@ -4,6 +4,23 @@ Each `## [x.y.z]` section is the release note for tag `vx.y.z`. The release work
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-11-25
+
+### Fixed
+- The king blob stays below the session blobs while a paired phone listens. Before, it hid when a session started.
+- Allow on a gated command the card showed only in part (more than one line, or cut) now opens Claude Code's own prompt with the full command.
+- The command gate also catches commands split by quotes or escapes, such as `git pu""sh` and `r\m`, and now gates `git clean`.
+- Phone pairing stops taking codes after 5 wrong guesses until the code expires, so the code cannot be guessed.
+- A permission card that moves under a still cursor starts arming again, so a click cannot land on Allow by accident.
+- The island no longer redraws 30 times a second while only the finished pill shows.
+- Telegram sends wait 2 s, then 4 s, between retries, so a rate limit no longer drops the message.
+- The settings file is written through a temp file, so a crash cannot empty it and unpair the phone.
+- A second phone text while a session picker is open no longer replaces the first one.
+- A todo deleted with a new subject in the same update now leaves the list.
+- Settings no longer open on their own after a permission card closes.
+- A session whose process ended stays off the island even if Windows reuses its process id.
+- Hooks no longer send large tool output to the island that it never reads.
+
 ## [0.2.8] - 2026-11-23
 
 ### Added
