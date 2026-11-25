@@ -418,6 +418,11 @@ fn keyboard(buttons: &[(String, String)]) -> Vec<Vec<Value>> {
     if all.len() > 2 { all.into_iter().map(|b| vec![b]).collect() } else { vec![all] }
 }
 
+/// Wait before send try `attempt`: a rate limit (429) or a network hiccup needs time to pass.
+fn retry_wait(attempt: u32) -> Duration {
+    if attempt == 0 { Duration::ZERO } else { Duration::from_secs(1 << attempt) }
+}
+
 fn send_loop(agent: &ureq::Agent, token: &str, chat: &AtomicI64, tx: &Sender<Msg>, rx: Receiver<Out>) {
     // Ends when the Link (the only Sender) is dropped.
     for o in rx {
@@ -448,6 +453,7 @@ fn send_loop(agent: &ureq::Agent, token: &str, chat: &AtomicI64, tx: &Sender<Msg
             }
         };
         for attempt in 0..3 {
+            std::thread::sleep(retry_wait(attempt));
             // A rejected format must not lose the answer: the last try goes out plain.
             if attempt == 2
                 && let Some(b) = body.as_object_mut()
@@ -467,6 +473,11 @@ fn send_loop(agent: &ureq::Agent, token: &str, chat: &AtomicI64, tx: &Sender<Msg
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retries_wait_longer_each_time() {
+        assert_eq!([0, 1, 2].map(retry_wait), [Duration::ZERO, Duration::from_secs(2), Duration::from_secs(4)]);
+    }
 
     #[test]
     fn parse_reply_text() {
