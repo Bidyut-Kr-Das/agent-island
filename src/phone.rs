@@ -119,6 +119,7 @@ impl PhoneStatus {
 }
 
 const CODE_TTL: Duration = Duration::from_secs(600);
+const PICK_FIRST: &str = "Pick where the last message goes first";
 
 fn new_code() -> String {
     format!("{:06}", RandomState::new().hash_one(0u8) % 1_000_000)
@@ -344,16 +345,14 @@ impl Phone {
             Incoming::LinkProblem(p) => self.problem = p,
             Incoming::Text { chat, text, .. } if paired == 0 => {
                 self.expire(now);
-                if text.trim() == self.code {
+                // After 5 wrong guesses no code counts until expire() makes a new one, so guessing stays slow.
+                if self.wrong < 5 && text.trim() == self.code {
                     self.chat.store(chat, Ordering::Relaxed);
                     self.save_chat(chat.into());
                     self.autostart(true);
                     self.say("Paired", vec![]);
                 } else {
                     self.wrong += 1;
-                    if self.wrong >= 5 {
-                        self.renew(now);
-                    }
                 }
             }
             Incoming::Text { chat, text, reply_to, .. } if chat == paired => {
@@ -386,6 +385,11 @@ impl Phone {
                     if let [(id, _)] = waiting[..] {
                         return self.record(id, text, sessions).map_or(Action::None, |r| Action::Answer(id, r, None));
                     }
+                    // One held text at a time: a second one would replace the text the open picker sends.
+                    if self.held.is_some() {
+                        self.say(PICK_FIRST, vec![]);
+                        return Action::None;
+                    }
                     let buttons = waiting.iter().filter_map(|&(id, qi)| {
                         let a = &self.asks[&id];
                         let s = sessions.iter().find(|s| s.id == a.session_id)?;
@@ -400,6 +404,7 @@ impl Phone {
                             let o = self.send_to(&s.id, &text, sessions);
                             self.say(o, vec![]);
                         }
+                        _ if self.held.is_some() => self.say(PICK_FIRST, vec![]),
                         _ => {
                             self.held = Some(text);
                             let buttons = sessions.iter().map(|s| (head(s), format!("s:{}", s.id))).collect();
@@ -1005,17 +1010,23 @@ mod tests {
     }
 
     #[test]
-    fn five_wrong_codes_renew() {
+    fn five_wrong_codes_lock_until_expiry() {
         let (mut p, _rx) = unpaired();
         let now = Instant::now();
-        let old = p.code.clone();
+        let code = p.code.clone();
         for _ in 0..5 {
             p.incoming(text(5, "x", None), &[], now);
         }
-        assert_ne!(p.code, old);
-        assert_eq!(p.wrong, 0);
-        p.incoming(text(5, &old, None), &[], now);
-        assert_eq!(p.chat.load(Ordering::Relaxed), 0);
+        p.incoming(text(5, &code, None), &[], now);
+        assert_eq!(p.code, code, "no new code to guess at");
+        assert_eq!(p.chat.load(Ordering::Relaxed), 0, "locked: the right code does not pair");
+        let later = now + CODE_TTL + Duration::from_secs(1);
+        p.incoming(text(5, "x", None), &[], later);
+        assert_ne!(p.code, code);
+        assert_eq!(p.wrong, 1, "expiry resets the count");
+        let fresh = p.code.clone();
+        p.incoming(text(5, &fresh, None), &[], later);
+        assert_eq!(p.chat.load(Ordering::Relaxed), 5);
     }
 
     #[test]
@@ -1155,6 +1166,15 @@ mod tests {
         p.incoming(b, &two(), Instant::now());
         assert!(matches!(rx.try_recv(), Ok(Out::Answer { text, .. }) if text == "Already answered"));
         assert!(matches!(rx.try_recv(), Ok(Out::Edit { text, .. }) if text.ends_with("\nAlready answered")));
+    }
+
+    #[test]
+    fn second_text_does_not_replace_held_text() {
+        let (mut p, rx) = paired();
+        p.incoming(text(7, "A", None), &two(), Instant::now());
+        p.incoming(text(7, "B", None), &two(), Instant::now());
+        assert_eq!(p.held.as_deref(), Some("A"));
+        assert_eq!(sent_texts(&rx), vec!["Which session?", PICK_FIRST]);
     }
 
     #[test]
